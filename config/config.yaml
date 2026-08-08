@@ -1,0 +1,110 @@
+# ============================================
+# A股多因子选股系统 - 配置文件
+# ============================================
+
+# --- 账户配置 ---
+account:
+  available_cash: 50000          # 可用资金（元）
+  max_position_ratio: 0.80       # 最大仓位比例
+  max_single_stock: 0.10         # 单只股票最大占比
+  holdings:                       # 当前持仓列表
+    # 格式: code: {name, shares, cost_price}
+    # 示例:
+    # "601318": {name: "中国平安", shares: 200, cost_price: 45.30}
+    # "002027": {name: "分众传媒", shares: 500, cost_price: 6.80}
+
+# --- 市场环境判断 (L0) ---
+env_regime:
+  indices:                        # 用于判断市场环境的指数
+    - code: "000001"              # 上证指数
+      name: "上证指数"
+    - code: "399001"              # 深证成指
+      name: "深证成指"
+    - code: "399006"              # 创业板指
+      name: "创业板指"
+  ma_short: 20                    # 短期均线天数
+  ma_long: 60                     # 长期均线天数
+  regime_thresholds:              # 市场环境判断阈值
+    bull_above_ma_ratio: 0.67     # 2/3以上指数站上长期均线 → 多头
+    bear_below_ma_ratio: 0.67     # 2/3以上指数跌破长期均线 → 空头
+    # 其余为震荡
+  position_caps:                  # 各环境下的仓位上限
+    多头: 0.80
+    震荡: 0.50
+    空头: 0.20
+
+# --- L2 预过滤 ---
+filter_l2:
+  exclude_st: true                # 排除ST/*ST
+  exclude_new: true               # 排除上市不足60天
+  exclude_suspended: true         # 排除停牌
+  min_market_cap: 20              # 最小市值（亿元）
+  max_pe: 200                     # 最大PE（排除负PE和异常值）
+  min_daily_amount: 0.5           # 最小日均成交额（亿元）
+
+# --- L4 多因子评分 ---
+factor_l4:
+  factors:
+    # 价值因子
+    - name: "pe_rank"
+      weight: 0.10
+      direction: "ascending"      # PE越低越好
+    - name: "pb_rank"
+      weight: 0.08
+      direction: "ascending"
+    # 质量因子
+    - name: "roe"
+      weight: 0.20
+      direction: "descending"     # ROE越高越好
+    - name: "gross_margin"
+      weight: 0.10
+      direction: "descending"
+    - name: "debt_ratio"
+      weight: 0.07
+      direction: "ascending"      # 负债率越低越好
+    # 成长因子
+    - name: "revenue_growth"
+      weight: 0.15
+      direction: "descending"
+    - name: "profit_growth"
+      weight: 0.15
+      direction: "descending"
+    # 动量因子
+    - name: "momentum_20d"
+      weight: 0.08
+      direction: "descending"
+    - name: "momentum_60d"
+      weight: 0.07
+      direction: "descending"
+  top_n: 30                       # L4最终选出前N只
+
+# --- 输出配置 ---
+output:
+  brief_dir: "briefs"             # 简报输出目录
+  brief_filename: "盘前选股简报.md"
+  date_based_archive: true        # 按日期分目录存档（避免覆盖）
+  quality_top_n: 10               # ②A质量榜数量
+  short_term_top_n: 5             # ②B短线榜数量
+  watchlist_top_n: 23             # ③C观察名单数量
+
+# --- 数据源 ---
+data_source:
+  provider: "westock-data"        # 数据源: westock-data CLI
+  cache_dir: "data_cache"         # 数据缓存目录
+  cache_expiry_hours: 12          # 缓存过期时间（小时）
+  request_timeout: 30             # 请求超时（秒）
+  max_retries: 3                  # 最大重试次数
+
+# --- v5 反弹引擎 ---
+rebound_engine:
+  enabled: true
+  lookback_days: 10               # 回看天数
+  decline_threshold: -0.08        # 跌幅阈值（-8%）
+  volume_surge_ratio: 1.5         # 量比阈值
+  bounce_confirm_days: 2          # 反弹确认天数
+
+# --- 日志 ---
+logging:
+  level: "INFO"                   # DEBUG / INFO / WARNING / ERROR
+  file: "data_cache/engine.log"
+  console: true

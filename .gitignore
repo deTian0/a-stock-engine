@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Data cache
+data_cache/
+*.csv
+*.json
+!config/config.yaml
+
+# Briefs (daily outputs)
+briefs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
