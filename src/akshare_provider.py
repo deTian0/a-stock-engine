@@ -13,6 +13,7 @@ akshare_provider.py - akshare 数据源
 """
 
 import logging
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
@@ -22,6 +23,12 @@ import pandas as pd
 from database import get_db
 
 logger = logging.getLogger(__name__)
+
+# 清除不可用的系统代理（HTTP/HTTPS_PROXY 环境变量）
+for _k in list(os.environ.keys()):
+    if _k.lower().endswith('_proxy') and '127.0.0.1' in os.environ.get(_k, ''):
+        del os.environ[_k]
+        logger.debug(f"已清除系统代理: {_k}={os.environ.get(_k, 'N/A')}")
 
 
 class AkshareProvider:
