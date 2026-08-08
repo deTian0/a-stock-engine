@@ -33,7 +33,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StockDB:
@@ -164,6 +164,17 @@ class StockDB:
         CREATE INDEX IF NOT EXISTS idx_holdings_date      ON holdings_snapshot(date);
         CREATE INDEX IF NOT EXISTS idx_factor_run         ON factor_scores(run_id);
         CREATE INDEX IF NOT EXISTS idx_factor_code        ON factor_scores(code);
+
+        CREATE TABLE IF NOT EXISTS market_data_cache (
+            cache_key     TEXT PRIMARY KEY,
+            data_type     TEXT    NOT NULL,
+            data_json     TEXT    NOT NULL,
+            source        TEXT,
+            rows_count    INTEGER,
+            created_at    TEXT    DEFAULT (datetime('now','localtime')),
+            expires_at    TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_market_type ON market_data_cache(data_type);
         """)
 
         c.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -590,6 +601,70 @@ class StockDB:
             "holdings_total_value": sum(h["market_value"] for h in holding if h["market_value"]),
             "t2_verifications": len(t2),
         }
+
+    # ============================================
+    #  行情数据缓存（供 akshare / westock 双源使用）
+    # ============================================
+
+    def cache_put(self, cache_key: str, data_type: str, data: pd.DataFrame,
+                  source: str = "", ttl_hours: int = 12) -> None:
+        """将行情数据缓存到 SQLite。"""
+        c = self.conn
+        expires = (datetime.now() + pd.Timedelta(hours=ttl_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        data_json = data.to_json(orient="records", force_ascii=False, date_format="iso")
+        c.execute("""
+            INSERT OR REPLACE INTO market_data_cache
+            (cache_key, data_type, data_json, source, rows_count, expires_at)
+            VALUES (?,?,?,?,?,?)
+        """, (cache_key, data_type, data_json, source, len(data), expires))
+        c.commit()
+        logger.debug(f"行情缓存写入: {cache_key} ({data_type}), {len(data)} 行")
+
+    def cache_get(self, cache_key: str) -> Optional[pd.DataFrame]:
+        """从 SQLite 读取行情数据缓存。"""
+        c = self.conn
+        row = c.execute("""
+            SELECT data_json, expires_at FROM market_data_cache
+            WHERE cache_key = ? AND (expires_at IS NULL OR expires_at > datetime('now','localtime'))
+        """, (cache_key,)).fetchone()
+        if row is None:
+            return None
+        try:
+            df = pd.read_json(row["data_json"], orient="records")
+            logger.debug(f"行情缓存命中: {cache_key}, {len(df)} 行")
+            return df
+        except (ValueError, KeyError) as e:
+            logger.warning(f"行情缓存解析失败 {cache_key}: {e}")
+            return None
+
+    def cache_get_batch(self, data_type: str, keys: list[str]) -> dict[str, pd.DataFrame]:
+        """批量读取缓存数据。返回 {key: DataFrame}"""
+        if not keys:
+            return {}
+        c = self.conn
+        placeholders = ",".join("?" for _ in keys)
+        rows = c.execute(f"""
+            SELECT cache_key, data_json FROM market_data_cache
+            WHERE cache_key IN ({placeholders})
+              AND (expires_at IS NULL OR expires_at > datetime('now','localtime'))
+        """, keys).fetchall()
+        results = {}
+        for row in rows:
+            try:
+                results[row["cache_key"]] = pd.read_json(row["data_json"], orient="records")
+            except (ValueError, KeyError):
+                pass
+        return results
+
+    def cache_clear_expired(self) -> int:
+        """清理过期缓存。返回清理条数。"""
+        c = self.conn
+        c.execute("DELETE FROM market_data_cache WHERE expires_at <= datetime('now','localtime')")
+        deleted = c.rowcount
+        c.commit()
+        if deleted > 0:
+            logger.info(f"清理过期行情缓存: {deleted} 条")
+        return deleted
 
 
 # ---- 全局单例 ----

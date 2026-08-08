@@ -93,7 +93,7 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
 
 
 class WestockCLI:
-    """westock-data CLI 封装，提供缓存和便捷方法。"""
+    """westock-data CLI 封装，失败时自动回退到 akshare。"""
 
     def __init__(self, cache_dir: str = "data_cache", cache_expiry_hours: int = 12):
         self.cache_dir = Path(cache_dir)
@@ -101,6 +101,7 @@ class WestockCLI:
         self.cache_expiry_seconds = cache_expiry_hours * 3600
         self._timeout = 30
         self._max_retries = 3
+        self._akshare = None  # 懒加载
 
     # ---- 缓存管理 ----
 
@@ -129,102 +130,146 @@ class WestockCLI:
         except OSError as e:
             logger.warning(f"写入缓存失败 {key}: {e}")
 
+    @property
+    def _ak(self):
+        """懒加载 akshare provider。"""
+        if self._akshare is None:
+            try:
+                from akshare_provider import get_akshare
+                self._akshare = get_akshare()
+                logger.info("已启用 akshare 数据源作为后备")
+            except ImportError:
+                logger.warning("akshare 未安装，仅使用 westock-data CLI")
+                self._akshare = None
+        return self._akshare
+
     # ---- 数据接口 ----
 
     def get_stock_list(self) -> pd.DataFrame:
-        """获取全A股股票列表。"""
+        """获取全A股股票列表。优先 westock-data，失败回退 akshare。"""
         cache_key = "stock_list"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
 
-        output = run_westock(["query", "--type", "stock_list", "--market", "A股"],
-                             timeout=self._timeout, max_retries=self._max_retries)
-        data = json.loads(output)
-        self._write_cache(cache_key, data)
-        return pd.DataFrame(data)
+        try:
+            output = run_westock(["query", "--type", "stock_list", "--market", "A股"],
+                                 timeout=self._timeout, max_retries=1)
+            data = json.loads(output)
+            self._write_cache(cache_key, data)
+            return pd.DataFrame(data)
+        except Exception as e:
+            logger.info(f"westock-data 股票列表失败: {e}，回退 akshare")
+            if self._ak:
+                return self._ak.get_stock_list()
+            raise
 
     def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> pd.DataFrame:
-        """
-        获取个股K线数据。
-        code: 股票代码，如 "000001"
-        days: 获取近多少个交易日
-        adjust: 复权方式 qfq(前复权) / hfq(后复权) / none(不复权)
-        """
+        """获取个股K线数据。优先 westock-data，失败回退 akshare。"""
         cache_key = f"kline_{code}_{days}_{adjust}"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
 
-        output = run_westock(
-            ["query", "--type", "kline", "--stock", code,
-             "--days", str(days), "--adjust", adjust],
-            timeout=self._timeout, max_retries=self._max_retries
-        )
-        data = json.loads(output)
-        self._write_cache(cache_key, data)
-        return pd.DataFrame(data)
+        try:
+            output = run_westock(
+                ["query", "--type", "kline", "--stock", code,
+                 "--days", str(days), "--adjust", adjust],
+                timeout=self._timeout, max_retries=1
+            )
+            data = json.loads(output)
+            self._write_cache(cache_key, data)
+            return pd.DataFrame(data)
+        except Exception as e:
+            logger.debug(f"westock-data K线失败 {code}: {e}，回退 akshare")
+            if self._ak:
+                return self._ak.get_kline(code, days, adjust)
+            return pd.DataFrame()
 
     def get_index_kline(self, code: str, days: int = 60) -> pd.DataFrame:
-        """获取指数K线数据。code: 指数代码，如 "000001"(上证指数)"""
+        """获取指数K线数据。优先 westock-data，失败回退 akshare。"""
         cache_key = f"index_kline_{code}_{days}"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
 
-        output = run_westock(
-            ["query", "--type", "kline", "--index", code, "--days", str(days)],
-            timeout=self._timeout, max_retries=self._max_retries
-        )
-        data = json.loads(output)
-        self._write_cache(cache_key, data)
-        return pd.DataFrame(data)
+        try:
+            output = run_westock(
+                ["query", "--type", "kline", "--index", code, "--days", str(days)],
+                timeout=self._timeout, max_retries=1
+            )
+            data = json.loads(output)
+            self._write_cache(cache_key, data)
+            return pd.DataFrame(data)
+        except Exception as e:
+            logger.debug(f"westock-data 指数K线失败 {code}: {e}，回退 akshare")
+            if self._ak:
+                return self._ak.get_index_kline(code, days)
+            return pd.DataFrame()
 
     def get_fundamentals(self, codes: list[str]) -> pd.DataFrame:
-        """获取股票基本面数据（PE/PB/ROE/毛利率/营收增速等）。"""
+        """获取基本面数据。优先 westock-data，失败回退 akshare。"""
+        import hashlib
         cache_key = f"fundamentals_{hashlib.md5(','.join(sorted(codes)).encode()).hexdigest()[:12]}"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
 
-        output = run_westock(
-            ["query", "--type", "fundamentals", "--stocks", ",".join(codes)],
-            timeout=self._timeout * 2,  # 基本面数据量大，超时加倍
-            max_retries=self._max_retries
-        )
-        data = json.loads(output)
-        self._write_cache(cache_key, data)
-        return pd.DataFrame(data)
+        try:
+            output = run_westock(
+                ["query", "--type", "fundamentals", "--stocks", ",".join(codes)],
+                timeout=self._timeout, max_retries=1
+            )
+            data = json.loads(output)
+            self._write_cache(cache_key, data)
+            return pd.DataFrame(data)
+        except Exception as e:
+            logger.info(f"westock-data 基本面失败: {e}，回退 akshare")
+            if self._ak:
+                return self._ak.get_fundamentals(codes)
+            return pd.DataFrame()
 
     def get_sector_mapping(self) -> dict[str, str]:
-        """获取股票-板块映射。返回 {code: sector_name}"""
+        """获取板块映射。优先 westock-data，失败回退 akshare。"""
         cache_key = "sector_mapping"
         cached = self._read_cache(cache_key)
         if cached:
             return cached
 
-        output = run_westock(
-            ["query", "--type", "sector_mapping"],
-            timeout=self._timeout, max_retries=self._max_retries
-        )
-        data = json.loads(output)
-        self._write_cache(cache_key, data)
-        return data
+        try:
+            output = run_westock(
+                ["query", "--type", "sector_mapping"],
+                timeout=self._timeout, max_retries=1
+            )
+            data = json.loads(output)
+            self._write_cache(cache_key, data)
+            return data
+        except Exception as e:
+            logger.info(f"westock-data 板块映射失败: {e}，回退 akshare")
+            if self._ak:
+                return self._ak.get_sector_mapping()
+            return {}
 
     def get_sector_list(self) -> pd.DataFrame:
-        """获取全板块行情数据（name/change_5d/change_20d/amount_change等）。"""
+        """获取板块行情列表。优先 westock-data，失败回退 akshare。"""
         cache_key = "sector_list"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
 
-        output = run_westock(
-            ["query", "--type", "sector_list"],
-            timeout=self._timeout, max_retries=self._max_retries
-        )
-        data = json.loads(output)
-        self._write_cache(cache_key, data)
-        return pd.DataFrame(data)
+        try:
+            output = run_westock(
+                ["query", "--type", "sector_list"],
+                timeout=self._timeout, max_retries=1
+            )
+            data = json.loads(output)
+            self._write_cache(cache_key, data)
+            return pd.DataFrame(data)
+        except Exception as e:
+            logger.info(f"westock-data 板块列表失败: {e}，回退 akshare")
+            if self._ak:
+                return self._ak.get_sector_list()
+            return pd.DataFrame()
 
 
 # ---- 全局单例 ----
