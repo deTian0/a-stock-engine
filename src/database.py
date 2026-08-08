@@ -101,9 +101,6 @@ class StockDB:
             created_at   TEXT    DEFAULT (datetime('now','localtime'))
         );
 
-        -- 为已有表升级（v3 新增列）
-        c.execute("ALTER TABLE stock_picks ADD COLUMN session_type TEXT DEFAULT 'pre_market'")
-
         CREATE TABLE IF NOT EXISTS t2_verifications (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             code         TEXT    NOT NULL,
@@ -213,6 +210,14 @@ class StockDB:
 
         c.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         c.commit()
+
+        # v3 升级：为已有 stock_picks 表添加 session_type 列（忽略重复添加错误）
+        try:
+            c.execute("ALTER TABLE stock_picks ADD COLUMN session_type TEXT DEFAULT 'pre_market'")
+            c.commit()
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+
         logger.info("数据库初始化完成")
 
     # ============================================

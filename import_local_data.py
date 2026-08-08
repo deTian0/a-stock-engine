@@ -30,7 +30,7 @@ STOCK_BASIC = r"D:\Download\BaiduNetdiskDownload\A股数据\A股日线\stock_bas
 CHUNK_SIZE = 1000          # 每块行数
 FILE_SLEEP_SEC = 0.5       # 文件间休眠
 CHUNK_SLEEP_SEC = 0.05     # 块间休眠
-MAX_FILES = None            # None=全部, or e.g. 10 for test
+MAX_FILES = 3            # None=全部, or e.g. 10 for test
 
 
 def import_houfuquan(db, data_dir: str):
@@ -49,11 +49,11 @@ def import_houfuquan(db, data_dir: str):
         logger.info(f"  [{fi+1}/{len(files)}] {date_str}...")
 
         try:
-            # 只读需要的列
+            # 只读需要的列（注意精确列名）
             usecols = [
                 "日期", "代码", "名称", "所属行业",
                 "收盘价", "滚动市盈率", "市净率",
-                "总市值", "流通市值", "成交量", "换手率", "涨幅%"
+                "总市值（元）", "流通市值（元）", "成交量（股）", "换手率", "涨幅%"
             ]
             df = pd.read_csv(fpath, encoding="utf-8", usecols=usecols, dtype={"代码": str})
             df["代码"] = df["代码"].str.zfill(6)
@@ -61,8 +61,8 @@ def import_houfuquan(db, data_dir: str):
                 "日期": "date", "代码": "code", "名称": "name",
                 "所属行业": "sector", "收盘价": "close",
                 "滚动市盈率": "pe", "市净率": "pb",
-                "总市值": "market_cap", "流通市值": "float_cap",
-                "成交量": "volume", "换手率": "turnover",
+                "总市值（元）": "market_cap", "流通市值（元）": "float_cap",
+                "成交量（股）": "volume", "换手率": "turnover",
                 "涨幅%": "change_pct",
             })
 
