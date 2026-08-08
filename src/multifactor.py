@@ -22,6 +22,8 @@ import os
 import logging
 import yaml
 import time
+import signal
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
@@ -39,6 +41,23 @@ from database import get_db
 from enrich_short import enrich
 
 logger = logging.getLogger(__name__)
+
+# 线程池关闭标志（信号安全）
+_executor_shutdown = threading.Event()
+
+
+def _signal_handler(signum, frame):
+    """信号处理器：设置关闭标志，触发线程池优雅退出。"""
+    logger.warning(f"收到信号 {signum}，正在关闭线程池...")
+    _executor_shutdown.set()
+
+
+# 在非主线程环境中注册可能失败（如 IDE 调试模式），忽略即可
+try:
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+except (ValueError, OSError):
+    pass
 
 
 class MultiFactorEngine:
@@ -301,30 +320,67 @@ class MultiFactorEngine:
         # Step 2: 预加载板块映射（避免并发中重复CLI调用）
         sector_map = self.sector_mapping
 
-        # Step 3: 并发获取价格数据
-        max_workers = min(8, total)
+        # Step 3: 并发获取价格数据（信号安全）
+        max_workers = min(self.config.get("concurrency", {}).get("max_workers", 4), total)
         logger.info(f"  并发获取价格数据: {max_workers} workers, {total} 只股票...")
 
         factor_list = []
         completed = 0
+        futures_map = {}
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._fetch_stock_data, code, fund_lookup, sector_map): code
-                for code in codes
-            }
+        executor = ThreadPoolExecutor(max_workers=max_workers)
 
-            for future in as_completed(futures):
+        try:
+            # Reset shutdown flag before starting
+            _executor_shutdown.clear()
+
+            for code in codes:
+                future = executor.submit(
+                    self._fetch_stock_data, code, fund_lookup, sector_map
+                )
+                futures_map[future] = code
+                # 错峰提交：每提交一个 worker 休息几毫秒，避免瞬时 CPU 尖峰
+                if len(futures_map) <= max_workers:
+                    delay = self.config.get("concurrency", {}).get("fetch_delay_ms", 50) / 1000.0
+                    if delay > 0:
+                        time.sleep(delay)
+
+            for future in as_completed(futures_map):
+                # 检查是否收到中断信号
+                if _executor_shutdown.is_set():
+                    logger.warning("收到中断信号，取消剩余任务...")
+                    for f in futures_map:
+                        f.cancel()
+                    executor.shutdown(wait=False)
+                    break
+
                 try:
-                    result = future.result()
+                    result = future.result(timeout=0.1)
                     factor_list.append(result)
                 except Exception as e:
-                    code = futures[future]
+                    code = futures_map[future]
                     logger.debug(f"并发取数失败 {code}: {e}")
 
                 completed += 1
                 if completed % 100 == 0 or completed == total:
                     logger.info(f"  L4 进度: {completed}/{total}")
+
+        except KeyboardInterrupt:
+            logger.warning("KeyboardInterrupt: 取消所有剩余任务...")
+            for f in futures_map:
+                f.cancel()
+            executor.shutdown(wait=False)
+            raise
+
+        finally:
+            # Ensure executor is always shutdown
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                # Python <3.9 doesn't support cancel_futures
+                for f in list(futures_map.keys()):
+                    f.cancel()
+                executor.shutdown(wait=False)
 
         # Step 4: 计算综合评分
         scores_df = pd.DataFrame(factor_list)

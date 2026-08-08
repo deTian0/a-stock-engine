@@ -7,6 +7,7 @@ kline_cache.py - K线数据本地缓存管理
 
 import json
 import time
+import os
 import logging
 from pathlib import Path
 from typing import Optional
@@ -53,19 +54,26 @@ class KlineCache:
             return None
 
     def put(self, code: str, df: pd.DataFrame, freq: str = "daily") -> None:
-        """写入K线数据到缓存。"""
+        """写入K线数据到缓存（原子操作，防并发竞态）。"""
         path = self._path(code, freq)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
         try:
-            # 确保 date 列可序列化
             df_to_save = df.copy()
             if "date" in df_to_save.columns and hasattr(df_to_save["date"].dtype, "tz"):
                 df_to_save["date"] = df_to_save["date"].dt.tz_localize(None)
             records = df_to_save.to_dict(orient="records")
-            path.write_text(json.dumps(records, ensure_ascii=False, default=str),
-                            encoding="utf-8")
+            data = json.dumps(records, ensure_ascii=False, default=str)
+            # 原子写入：先写临时文件，再 rename
+            tmp_path.write_text(data, encoding="utf-8")
+            os.replace(tmp_path, path)  # Windows 上也是原子的
             logger.debug(f"K线缓存写入: {code} ({freq}), {len(df)} 条")
         except (OSError, TypeError) as e:
             logger.warning(f"写入K线缓存失败 {code}: {e}")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     def clear(self, code: Optional[str] = None) -> None:
         """清除缓存。code=None 清除全部。"""

@@ -20,6 +20,7 @@ import json
 import hashlib
 import logging
 import time
+import signal
 from pathlib import Path
 from typing import Optional
 
@@ -46,10 +47,10 @@ def _kill_process_tree(pid: int) -> None:
 def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str:
     """
     调用 westock-data CLI 并返回 stdout 输出。
-    包含重试机制和超时处理。
+    包含重试机制、超时处理、子进程清理。
 
     Args:
-        args: CLI 参数列表，如 ["query", "--stock", "000001", "--type", "kline"]
+        args: CLI 参数列表
         timeout: 超时秒数
         max_retries: 最大重试次数
 
@@ -63,31 +64,68 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
     last_error = None
 
     for attempt in range(1, max_retries + 1):
+        proc = None
         try:
             logger.debug(f"westock CLI 调用 (尝试 {attempt}/{max_retries}): {' '.join(cmd)}")
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                check=True
             )
-            return result.stdout
+            stdout, stderr = proc.communicate(timeout=timeout)
+
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    proc.returncode, cmd, output=stdout, stderr=stderr
+                )
+
+            return stdout
+
         except subprocess.TimeoutExpired:
             logger.warning(f"westock CLI 超时 (尝试 {attempt}/{max_retries})")
             last_error = "timeout"
+            # 必须清理子进程，否则会成为僵尸
+            if proc is not None:
+                try:
+                    _kill_process_tree(proc.pid)
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"子进程 {proc.pid} 无法正常终止，强制结束")
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=3)
+                    except Exception:
+                        pass
+
         except subprocess.CalledProcessError as e:
-            logger.warning(f"westock CLI 返回非零退出码 {e.returncode} (尝试 {attempt}/{max_retries}): {e.stderr[:200]}")
+            logger.warning(
+                f"westock CLI 返回非零退出码 {e.returncode} "
+                f"(尝试 {attempt}/{max_retries}): {(e.stderr or '')[:200]}"
+            )
             last_error = f"exit_code={e.returncode}"
+
         except FileNotFoundError:
             logger.error("westock-data CLI 未找到，请确认已安装 westock-data skill")
             raise RuntimeError("westock-data CLI 不可用")
+
         except Exception as e:
-            logger.warning(f"westock CLI 异常 (尝试 {attempt}/{max_retries}): {type(e).__name__}: {e}")
+            logger.warning(
+                f"westock CLI 异常 (尝试 {attempt}/{max_retries}): "
+                f"{type(e).__name__}: {e}"
+            )
             last_error = str(e)
+            if proc is not None:
+                try:
+                    _kill_process_tree(proc.pid)
+                except Exception:
+                    pass
 
         if attempt < max_retries:
-            time.sleep(1 * attempt)  # 递增等待
+            time.sleep(1 * attempt)
 
     raise RuntimeError(f"westock CLI 调用失败（重试 {max_retries} 次）: {last_error}")
 
