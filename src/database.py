@@ -27,6 +27,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from io import StringIO
 
 import pandas as pd
 import numpy as np
@@ -672,7 +673,7 @@ class StockDB:
         if row is None:
             return None
         try:
-            df = pd.read_json(row["data_json"], orient="records")
+            df = pd.read_json(StringIO(row["data_json"]), orient="records")
             logger.debug(f"行情缓存命中: {cache_key}, {len(df)} 行")
             return df
         except (ValueError, KeyError) as e:
@@ -693,7 +694,7 @@ class StockDB:
         results = {}
         for row in rows:
             try:
-                results[row["cache_key"]] = pd.read_json(row["data_json"], orient="records")
+                results[row["cache_key"]] = pd.read_json(StringIO(row["data_json"]), orient="records")
             except (ValueError, KeyError):
                 pass
         return results
