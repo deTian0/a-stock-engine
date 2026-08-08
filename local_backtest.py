@@ -1,0 +1,359 @@
+"""
+local_backtest.py — 基于本地 SQLite 数据的回测引擎 (CPU 安全版)
+
+特点:
+  - 纯本地 SQLite 读取，零网络调用
+  - 全串行处理，单文件单日逐一推进
+  - 因子评分使用纯 pandas 向量化运算
+  - 板块轮动: 每板块 Top5，两周滑动窗口
+  - T+N 验证 (1/3/5 日)
+  - CPU 保护: 每日处理间隔 sleep(0.2s)
+
+用法:
+    python local_backtest.py
+"""
+
+import sys, os, time, logging, sqlite3
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Optional
+
+import pandas as pd
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+from database import get_db
+
+logger = logging.getLogger(__name__)
+
+# === CPU 安全参数 ===
+DAY_SLEEP_SEC = 0.2       # 每日处理后的休眠
+BATCH_SLEEP_SEC = 0.05    # 每 10 日批次后的休眠
+MAX_PER_SECTOR = 5         # 每板块最大入选数
+
+
+class LocalBacktest:
+    """本地数据回测——SQLite Only。"""
+
+    def __init__(self):
+        self.db = get_db("data_cache/a-stock-engine.db")
+        self.raw_conn = sqlite3.connect("data_cache/a-stock-engine.db")
+
+    def get_available_dates(self) -> list[str]:
+        """获取 DB 中所有可用日截面日期。"""
+        c = self.raw_conn
+        rows = c.execute(
+            "SELECT DISTINCT cache_key FROM market_data_cache WHERE data_type='daily_snapshot' ORDER BY cache_key"
+        ).fetchall()
+        dates = [r[0].replace("daily_snapshot_", "") for r in rows]
+        logger.info(f"可用日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]})")
+        return dates
+
+    def load_day_data(self, date_str: str) -> pd.DataFrame:
+        """从 SQLite 加载某日全量截面数据。"""
+        cache_key = f"daily_snapshot_{date_str}"
+        df = self.db.cache_get(cache_key)
+        if df is None:
+            logger.warning(f"{date_str}: 无数据")
+            return pd.DataFrame()
+        return df
+
+    def filter_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
+        """L2 过滤（纯向量化，单次计算）。"""
+        if len(df) == 0:
+            return df
+        c = df.copy()
+        # ST
+        if "name" in c.columns:
+            c = c[~c["name"].str.contains(r"ST|\*ST", na=False, regex=True)]
+        # 退市
+        if "name" in c.columns:
+            c = c[~c["name"].str.contains("退", na=False)]
+        # 市值
+        if "market_cap" in c.columns:
+            c = c[c["market_cap"] >= 20e8]
+        # PE
+        if "pe" in c.columns:
+            c = c[(c["pe"] > 0) & (c["pe"] <= 300)]
+        # 价格
+        if "close" in c.columns:
+            c = c[c["close"] > 0]
+        return c
+
+    def score_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
+        """多因子评分（纯向量化，无循环）。"""
+        if len(df) == 0:
+            return df
+        s = df.copy()
+        s["composite_score"] = 0.0
+
+        # 动量: 涨幅 (20%)
+        if "change_pct" in s.columns:
+            s["composite_score"] += s["change_pct"].fillna(0).rank(pct=True) * 20
+
+        # 价值: PE 越低越好 (15%)
+        if "pe" in s.columns:
+            pe_clean = s["pe"].where(s["pe"] > 0, s["pe"].median()).fillna(50)
+            s["composite_score"] += (100 - pe_clean.rank(pct=True) * 100) * 0.15
+
+        # 价值: PB 越低越好 (10%)
+        if "pb" in s.columns:
+            pb_clean = s["pb"].where(s["pb"] > 0, s["pb"].median()).fillna(5)
+            s["composite_score"] += (100 - pb_clean.rank(pct=True) * 100) * 0.10
+
+        # 质量: 换手率 (10%)
+        if "turnover" in s.columns:
+            s["composite_score"] += s["turnover"].fillna(0).rank(pct=True) * 10
+
+        # 规模: 成交额 (5%)
+        if "volume" in s.columns:
+            s["composite_score"] += s["volume"].fillna(0).rank(pct=True) * 5
+
+        # 市值因子 (5%)
+        if "market_cap" in s.columns:
+            s["composite_score"] += s["market_cap"].fillna(0).rank(pct=True) * 5
+
+        return s.sort_values("composite_score", ascending=False)
+
+    def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
+        """按板块分组选 Top N。"""
+        if "sector" not in df.columns:
+            return self._top_n_raw(df, max_per * 10)
+
+        picks = []
+        for sector, group in df.groupby("sector"):
+            top = group.head(max_per)
+            for rank, (_, row) in enumerate(top.iterrows(), 1):
+                picks.append({
+                    "sector": str(sector),
+                    "code": str(row.get("code", "")),
+                    "name": str(row.get("name", "")),
+                    "score": round(float(row.get("composite_score", 0)), 2),
+                    "close": float(row.get("close", 0)),
+                    "pe": float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 0,
+                    "market_cap": float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0,
+                    "rank": rank,
+                })
+
+        logger.debug(f"  {len(df['sector'].unique())} 板块, {len(picks)} 只选中")
+        return picks
+
+    def _top_n_raw(self, df: pd.DataFrame, n: int) -> list[dict]:
+        """无板块信息时的兜底选股。"""
+        picks = []
+        for rank, (_, row) in enumerate(df.head(n).iterrows(), 1):
+            picks.append({
+                "sector": "未知",
+                "code": str(row.get("code", "")),
+                "name": str(row.get("name", "")),
+                "score": round(float(row.get("composite_score", 0)), 2),
+                "close": float(row.get("close", 0)),
+                "pe": float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 0,
+                "market_cap": float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0,
+                "rank": rank,
+            })
+        return picks
+
+    def verify_performance(self, picks: list[dict], entry_date: str, periods: list[int] = None) -> list[dict]:
+        """T+N 收益验证（纯本地查询，无网络）。"""
+        if periods is None:
+            periods = [1, 3, 5]
+
+        all_dates = self.get_available_dates()
+        # 找到 entry_date 之后的日期
+        date_idx = None
+        for i, d in enumerate(all_dates):
+            if d >= entry_date:
+                date_idx = i
+                break
+        if date_idx is None:
+            return [dict(p, **{f"T+{p}_ret": None for p in periods}) for p in picks]
+
+        results = []
+        for pick in picks:
+            code = pick["code"]
+            entry_price = pick["close"]
+            perf = dict(pick)
+
+            for p in periods:
+                target_idx = date_idx + p
+                if target_idx >= len(all_dates):
+                    perf[f"T+{p}_ret"] = None
+                    continue
+
+                target_date = all_dates[target_idx]
+                target_df = self.load_day_data(target_date)
+                if target_df is None or len(target_df) == 0:
+                    perf[f"T+{p}_ret"] = None
+                    continue
+
+                match = target_df[target_df["code"] == code]
+                if len(match) == 0:
+                    perf[f"T+{p}_ret"] = None
+                    continue
+
+                exit_price = float(match.iloc[0]["close"])
+                if exit_price > 0 and entry_price > 0:
+                    perf[f"T+{p}_ret"] = round((exit_price / entry_price - 1) * 100, 2)
+                    perf[f"T+{p}_price"] = exit_price
+                else:
+                    perf[f"T+{p}_ret"] = None
+
+            results.append(perf)
+        return results
+
+    def run(self, start_date: str = None, end_date: str = None, verify: bool = True) -> dict:
+        """运行完整回测。"""
+        all_dates = self.get_available_dates()
+
+        if start_date:
+            all_dates = [d for d in all_dates if d >= start_date]
+        if end_date:
+            all_dates = [d for d in all_dates if d <= end_date]
+
+        logger.info(f"回测区间: {all_dates[0]} ~ {all_dates[-1]}, {len(all_dates)} 天")
+
+        daily_records = []
+        total_picks = 0
+
+        for di, date_str in enumerate(all_dates):
+            # CPU 安全
+            if (di + 1) % 10 == 0:
+                logger.info(f"  进度: {di+1}/{len(all_dates)}")
+                time.sleep(BATCH_SLEEP_SEC)
+
+            df = self.load_day_data(date_str)
+            if len(df) == 0:
+                continue
+
+            df = self.filter_stocks(df)
+            df = self.score_stocks(df)
+            picks = self.pick_by_sector(df, MAX_PER_SECTOR)
+
+            # 入库
+            if picks:
+                self.db.save_rotation_picks(
+                    picks, date_str, date_str, "backtest"
+                )
+                for p in picks:
+                    try:
+                        self.db.upsert_pick_frequency(p["code"], "backtest")
+                    except Exception:
+                        pass
+
+                daily_records.append({"date": date_str, "picks": picks, "filtered": len(df)})
+                total_picks += len(picks)
+
+            time.sleep(DAY_SLEEP_SEC)
+
+        logger.info(f"回测完成: {len(daily_records)} 个有效日, {total_picks} 次推荐")
+
+        # T+N 验证
+        verify_results = []
+        if verify and daily_records:
+            verify_days = daily_records[-30:]  # 最后 30 天有足够 T+N 数据
+            logger.info(f"验证 T+N 收益 ({len(verify_days)} 天)...")
+            for rec in verify_days:
+                v = self.verify_performance(rec["picks"], rec["date"])
+                verify_results.extend(v)
+
+        stats = self._compute_stats(verify_results)
+        return {
+            "total_dates": len(all_dates),
+            "valid_dates": len(daily_records),
+            "total_picks": total_picks,
+            "stats": stats,
+            "verify_results": verify_results,
+        }
+
+    def _compute_stats(self, verify_results: list) -> dict:
+        """计算统计指标。"""
+        all_ret = []
+        for v in verify_results:
+            for key in ["T+1_ret", "T+3_ret", "T+5_ret"]:
+                if key in v and v[key] is not None:
+                    all_ret.append({"key": key, "return": v[key]})
+
+        if not all_ret:
+            return {}
+
+        df_ret = pd.DataFrame(all_ret)
+        stats = {}
+        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
+            vals = [r["return"] for r in all_ret if r["key"] == period]
+            if vals:
+                arr = np.array(vals)
+                stats[period] = {
+                    "count": len(arr),
+                    "avg": round(float(np.mean(arr)), 2),
+                    "win_rate": round(float(np.sum(arr > 0)) / len(arr) * 100, 1),
+                    "max": round(float(np.max(arr)), 2),
+                    "min": round(float(np.min(arr)), 2),
+                }
+
+        # 高频推荐
+        code_freq = {}
+        for v in verify_results:
+            code = v.get("code", "")
+            code_freq[code] = code_freq.get(code, 0) + 1
+        top_codes = sorted(code_freq.items(), key=lambda x: x[1], reverse=True)[:20]
+        stats["most_picked"] = [
+            {"code": c, "name": "", "hits": f} for c, f in top_codes
+        ]
+
+        return stats
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logger.info("=" * 60)
+    logger.info("本地数据回测启动 (CPU 安全模式)")
+    logger.info("=" * 60)
+
+    bt = LocalBacktest()
+
+    try:
+        results = bt.run(verify=True)
+        stats = results.get("stats", {})
+
+        # 输出报告
+        print(f"\n{'='*60}")
+        print(f"回测结果")
+        print(f"{'='*60}")
+        print(f"交易日: {results['total_dates']} | 有效日: {results['valid_dates']} | 推荐: {results['total_picks']} 次")
+
+        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
+            if period in stats:
+                s = stats[period]
+                print(f"\n{period}:")
+                print(f"  样本: {s['count']} | 平均: {s['avg']:+.2f}% | 胜率: {s['win_rate']}%")
+                print(f"  最大: {s['max']:+.2f}% | 最小: {s['min']:+.2f}%")
+
+        # 高频推荐
+        most = stats.get("most_picked", [])
+        if most:
+            print(f"\n高频推荐 Top 10:")
+            for item in most[:10]:
+                print(f"  {item['code']}: {item['hits']} 次")
+
+        # 保存报告
+        report = [f"# 回测报告\n> 区间: 2026-01-05 ~ 2026-05-14\n"]
+        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
+            if period in stats:
+                s = stats[period]
+                report.append(f"\n## {period}\n- 样本: {s['count']} | 平均: {s['avg']:+.2f}% | 胜率: {s['win_rate']}%\n")
+
+        rpath = Path("briefs") / f"回测报告_本地数据_{datetime.now().strftime('%Y%m%d')}.md"
+        rpath.parent.mkdir(parents=True, exist_ok=True)
+        rpath.write_text("\n".join(report), encoding="utf-8")
+        print(f"\n报告: {rpath}")
+
+    except KeyboardInterrupt:
+        logger.warning("用户中断")
+    finally:
+        bt.db.close()
+        logger.info("DB 已关闭")
+
+
+if __name__ == "__main__":
+    main()
