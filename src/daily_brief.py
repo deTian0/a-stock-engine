@@ -11,6 +11,7 @@ import sys
 import os
 import logging
 import yaml
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -178,6 +179,12 @@ def save_brief(content: str, config: dict) -> Path:
 
 def main():
     """主入口：运行引擎 → 生成简报 → 保存文件。"""
+    parser = argparse.ArgumentParser(description="盘前/盘后选股简报生成器")
+    parser.add_argument("--session", default="pre_market",
+                        choices=["pre_market", "post_market"],
+                        help="选股时段 (默认 pre_market)")
+    args, _ = parser.parse_known_args()
+
     setup_protection()
 
     config_path = Path(__file__).parent.parent / "config/config.yaml"
@@ -190,13 +197,15 @@ def main():
         console=config.get("logging", {}).get("console", True),
     )
 
+    session_label = "盘前" if args.session == "pre_market" else "盘后"
+
     try:
         logger.info("=" * 60)
-        logger.info("盘前选股简报生成器启动")
+        logger.info(f"{session_label}选股简报生成器启动")
         logger.info("=" * 60)
 
         engine = MultiFactorEngine(config_dict=config)
-        results = engine.run()
+        results = engine.run(session_type=args.session)
 
         if "error" in results:
             logger.error(f"引擎运行失败: {results['error']}")

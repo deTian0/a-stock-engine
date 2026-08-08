@@ -109,6 +109,15 @@ concurrency:
   fetch_delay_ms: 50               # 每个 worker 启动间隔（毫秒），避免瞬时 CPU 尖峰
   subprocess_timeout: 30           # 单个 CLI 调用超时（秒）
 
+# --- 板块轮动追踪 ---
+rotation:
+  max_per_sector_stock: 5           # 每板块最大股票数
+  max_per_sector_etf: 5             # 每板块最大 ETF 数
+  window_days: 14                   # 滑动窗口天数
+  sessions:                         # 盘前/盘后
+    - pre_market                    # 09:00 盘前
+    - post_market                   # 16:00 盘后
+
 # --- 日志 ---
 logging:
   level: "INFO"                   # DEBUG / INFO / WARNING / ERROR
