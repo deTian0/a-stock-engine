@@ -1,0 +1,597 @@
+"""
+database.py - SQLite 数据库层
+
+提供选股系统的数据持久化能力。
+4张核心表：
+  stock_picks       — 每次运行的选股结果
+  t2_verifications  — T+2 验证逐笔记录
+  holdings_snapshot — 每日持仓快照
+  factor_scores     — 每只股票每次运行的因子评分明细
+
+用法:
+    from database import StockDB
+    db = StockDB("data_cache/a-stock-engine.db")
+
+    run_id = db.save_run_results(results, categories)
+    db.save_factor_scores(run_id, enriched_df, l4_df)
+    db.save_holdings_snapshot(holdings_data)
+    db.save_t2_verification(pick_date, verifications_list)
+
+    history = db.get_run_history(days=30)
+    stats = db.get_t2_stats(days=30)
+"""
+
+import sqlite3
+import json
+import logging
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+
+
+class StockDB:
+    """选股系统 SQLite 数据库。"""
+
+    def __init__(self, db_path: str = "data_cache/a-stock-engine.db"):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: Optional[sqlite3.Connection] = None
+        self._init_schema()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+        return self._conn
+
+    def close(self):
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _init_schema(self):
+        """建表（如果不存在）。"""
+        c = self.conn
+        c.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER)")
+
+        row = c.execute("SELECT version FROM schema_version").fetchone()
+        current = row["version"] if row else 0
+
+        if current >= SCHEMA_VERSION:
+            return
+
+        logger.info("初始化数据库表结构...")
+
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS stock_picks (
+            run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            date         TEXT    NOT NULL,
+            code         TEXT    NOT NULL,
+            name         TEXT,
+            category     TEXT    NOT NULL,
+            composite_score REAL,
+            sector       TEXT,
+            regime       TEXT,
+            position_cap REAL,
+            l2_filtered  INTEGER,
+            elapsed_sec  REAL,
+            created_at   TEXT    DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS t2_verifications (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            code         TEXT    NOT NULL,
+            name         TEXT,
+            pick_date    TEXT    NOT NULL,
+            t0_close     REAL,
+            t2_close     REAL,
+            return_pct   REAL,
+            status       TEXT,
+            verified_at  TEXT    DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS holdings_snapshot (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            date          TEXT    NOT NULL,
+            code          TEXT    NOT NULL,
+            name          TEXT,
+            shares        INTEGER,
+            cost_price    REAL,
+            current_price REAL,
+            cost_value    REAL,
+            market_value  REAL,
+            hold_return_pct REAL,
+            composite_score REAL,
+            sector        TEXT,
+            created_at    TEXT    DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS factor_scores (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          INTEGER NOT NULL,
+            code            TEXT    NOT NULL,
+            name            TEXT,
+            composite_score REAL,
+            pe              REAL,
+            pb              REAL,
+            roe             REAL,
+            gross_margin    REAL,
+            debt_ratio      REAL,
+            revenue_growth  REAL,
+            profit_growth   REAL,
+            momentum_20d    REAL,
+            momentum_60d    REAL,
+            market_cap      REAL,
+            sector          TEXT,
+            rsi             REAL,
+            kdj_k           REAL,
+            kdj_d           REAL,
+            kdj_j           REAL,
+            ma5_slope       REAL,
+            ma10_slope      REAL,
+            volume_ratio    REAL,
+            short_signal    TEXT,
+            created_at      TEXT    DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (run_id) REFERENCES stock_picks(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_stock_picks_date   ON stock_picks(date);
+        CREATE INDEX IF NOT EXISTS idx_stock_picks_code   ON stock_picks(code);
+        CREATE INDEX IF NOT EXISTS idx_t2_pick_date       ON t2_verifications(pick_date);
+        CREATE INDEX IF NOT EXISTS idx_t2_code            ON t2_verifications(code);
+        CREATE INDEX IF NOT EXISTS idx_holdings_date      ON holdings_snapshot(date);
+        CREATE INDEX IF NOT EXISTS idx_factor_run         ON factor_scores(run_id);
+        CREATE INDEX IF NOT EXISTS idx_factor_code        ON factor_scores(code);
+        """)
+
+        c.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        c.commit()
+        logger.info("数据库初始化完成")
+
+    # ============================================
+    #  写入方法
+    # ============================================
+
+    def save_run_results(self, results: dict, categories: dict) -> int:
+        """
+        保存一次选股运行的完整结果。
+        返回本次运行的 run_id。
+        """
+        regime = results.get("regime", {})
+        regime_name = regime.get("regime", "未知") if isinstance(regime, dict) else "未知"
+        cap = regime.get("position_cap", 0) if isinstance(regime, dict) else 0
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        c = self.conn
+
+        # 获取一个新的 run_id
+        c.execute("SELECT COALESCE(MAX(run_id), 0) + 1 AS next_id FROM stock_picks")
+        run_id = c.execute("SELECT COALESCE(MAX(run_id), 0) + 1 FROM stock_picks").fetchone()[0]
+
+        rows = []
+        for cat_name, cat_df in categories.items():
+            if cat_df is None or len(cat_df) == 0:
+                continue
+            for _, row in cat_df.iterrows():
+                code = row.get("code", "")
+                rows.append((
+                    run_id, today, code,
+                    str(row.get("name", code)),
+                    cat_name,
+                    float(row.get("composite_score", 0)) if row.get("composite_score") is not None else 0,
+                    str(row.get("sector", "")),
+                    regime_name, cap,
+                    results.get("l2_filtered_count", 0),
+                    results.get("elapsed_seconds", 0),
+                ))
+
+        if rows:
+            c.executemany("""
+                INSERT INTO stock_picks
+                (run_id, date, code, name, category, composite_score, sector,
+                 regime, position_cap, l2_filtered, elapsed_sec)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, rows)
+            c.commit()
+
+        logger.info(f"选股结果已入库: run_id={run_id}, {len(rows)} 条记录")
+        return run_id
+
+    def save_factor_scores(self, run_id: int, enriched_df: pd.DataFrame,
+                           l4_df: pd.DataFrame = None) -> int:
+        """
+        保存因子评分明细。
+        enriched_df: 来自 enrich_short.py 的增强数据
+        l4_df: 来自 multifactor.py 的 L4 数据（如果 enriched_df 没有完整字段）
+        """
+        c = self.conn
+
+        df = enriched_df.copy()
+        if "code" not in df.columns:
+            logger.warning("factor_scores: 数据缺少 code 列")
+            return 0
+
+        rows = []
+        for _, row in df.iterrows():
+            code = row.get("code", "")
+
+            def _f(key, default=0.0):
+                v = row.get(key)
+                return float(v) if v is not None and pd.notna(v) else default
+
+            def _s(key, default=""):
+                v = row.get(key)
+                return str(v) if v is not None and pd.notna(v) else default
+
+            rows.append((
+                run_id, code, _s("name", code),
+                _f("composite_score"), _f("pe"), _f("pb"), _f("roe"),
+                _f("gross_margin"), _f("debt_ratio"),
+                _f("revenue_growth"), _f("profit_growth"),
+                _f("momentum_20d"), _f("momentum_60d"),
+                _f("market_cap"), _s("sector"),
+                _f("rsi"), _f("kdj_k"), _f("kdj_d"), _f("kdj_j"),
+                _f("ma5_slope"), _f("ma10_slope"), _f("volume_ratio"),
+                _s("short_signal"),
+            ))
+
+        if rows:
+            c.executemany("""
+                INSERT INTO factor_scores
+                (run_id, code, name, composite_score, pe, pb, roe,
+                 gross_margin, debt_ratio, revenue_growth, profit_growth,
+                 momentum_20d, momentum_60d, market_cap, sector,
+                 rsi, kdj_k, kdj_d, kdj_j, ma5_slope, ma10_slope,
+                 volume_ratio, short_signal)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, rows)
+            c.commit()
+
+        logger.info(f"因子评分已入库: run_id={run_id}, {len(rows)} 条")
+        return len(rows)
+
+    def save_holdings_snapshot(self, holdings: dict, l4_results: pd.DataFrame = None) -> int:
+        """
+        保存每日持仓快照。
+        holdings: config 中的 {code: {name, shares, cost_price}}
+        l4_results: L4 评分结果，用于补充当前评分
+        """
+        if not holdings:
+            return 0
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        c = self.conn
+        rows = []
+
+        for code, info in holdings.items():
+            if not isinstance(info, dict):
+                continue
+            name = info.get("name", code)
+            shares = info.get("shares", 0)
+            cost_price = info.get("cost_price", 0)
+
+            cost_value = shares * cost_price
+            current_price = cost_price  # 默认用成本价
+
+            # 从 L4 结果中查找当前评分
+            score = None
+            sector = ""
+            if l4_results is not None and len(l4_results) > 0 and "code" in l4_results.columns:
+                match = l4_results[l4_results["code"] == code]
+                if len(match) > 0:
+                    score = match.iloc[0].get("composite_score")
+                    sector = str(match.iloc[0].get("sector", ""))
+
+            hold_return = 0.0
+            market_value = cost_value
+            if current_price and cost_price and cost_price > 0:
+                hold_return = (current_price / cost_price - 1) * 100
+                market_value = shares * current_price
+
+            rows.append((
+                today, code, str(name), shares, cost_price,
+                current_price, cost_value, market_value,
+                round(hold_return, 2),
+                round(float(score), 2) if score is not None else None,
+                sector,
+            ))
+
+        if rows:
+            c.executemany("""
+                INSERT INTO holdings_snapshot
+                (date, code, name, shares, cost_price, current_price,
+                 cost_value, market_value, hold_return_pct, composite_score, sector)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, rows)
+            c.commit()
+
+        logger.info(f"持仓快照已入库: {today}, {len(rows)} 只")
+        return len(rows)
+
+    def save_t2_verification(self, pick_date: str, verifications: list[dict]) -> int:
+        """
+        保存 T+2 验证结果。
+        verifications: list of {code, name, t0_close, t2_close, return_pct, status}
+        """
+        if not verifications:
+            return 0
+
+        c = self.conn
+        rows = []
+        for v in verifications:
+            rows.append((
+                v.get("code", ""),
+                v.get("name", ""),
+                pick_date,
+                v.get("t0_close"),
+                v.get("t2_close"),
+                v.get("return_pct"),
+                v.get("status", ""),
+            ))
+
+        c.executemany("""
+            INSERT INTO t2_verifications
+            (code, name, pick_date, t0_close, t2_close, return_pct, status)
+            VALUES (?,?,?,?,?,?,?)
+        """, rows)
+        c.commit()
+
+        logger.info(f"T+2验证已入库: {pick_date}, {len(rows)} 条")
+        return len(rows)
+
+    # ============================================
+    #  查询方法
+    # ============================================
+
+    def get_latest_run(self) -> Optional[dict]:
+        """获取最近一次选股运行的汇总信息。"""
+        c = self.conn
+        row = c.execute("""
+            SELECT run_id, date, regime, position_cap, l2_filtered, elapsed_sec,
+                   COUNT(*) AS pick_count,
+                   SUM(CASE WHEN category='②A_质量榜' THEN 1 ELSE 0 END) AS quality_count,
+                   SUM(CASE WHEN category='②B_短线榜' THEN 1 ELSE 0 END) AS short_count,
+                   SUM(CASE WHEN category='③C_观察名单' THEN 1 ELSE 0 END) AS watch_count
+            FROM stock_picks
+            GROUP BY run_id
+            ORDER BY run_id DESC
+            LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+
+    def get_run_history(self, days: int = 30) -> list[dict]:
+        """获取近N天的选股运行历史。"""
+        c = self.conn
+        rows = c.execute("""
+            SELECT run_id, date, regime, position_cap, l2_filtered, elapsed_sec,
+                   COUNT(*) AS pick_count,
+                   AVG(composite_score) AS avg_score,
+                   MAX(composite_score) AS max_score
+            FROM stock_picks
+            WHERE date >= date('now', ?)
+            GROUP BY run_id
+            ORDER BY run_id DESC
+        """, (f"-{days} days",)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_run_detail(self, run_id: int) -> dict:
+        """获取某次运行的完整明细。"""
+        c = self.conn
+        picks = c.execute(
+            "SELECT * FROM stock_picks WHERE run_id=? ORDER BY category, composite_score DESC",
+            (run_id,)
+        ).fetchall()
+
+        factors = c.execute(
+            "SELECT * FROM factor_scores WHERE run_id=? ORDER BY composite_score DESC",
+            (run_id,)
+        ).fetchall()
+
+        return {
+            "picks": [dict(p) for p in picks],
+            "factors": [dict(f) for f in factors],
+        }
+
+    def get_t2_stats(self, days: int = 30) -> dict:
+        """获取近N天的 T+2 验证统计数据。"""
+        c = self.conn
+        rows = c.execute("""
+            SELECT return_pct
+            FROM t2_verifications
+            WHERE pick_date >= date('now', ?)
+              AND status = 'success'
+              AND return_pct IS NOT NULL
+        """, (f"-{days} days",)).fetchall()
+
+        returns = [r["return_pct"] for r in rows]
+        if not returns:
+            return {"count": 0, "positive": 0, "win_rate": 0,
+                    "avg_return": 0, "median_return": 0,
+                    "max_return": 0, "min_return": 0, "std": 0}
+
+        import numpy as np
+        arr = np.array(returns)
+        positive = int(np.sum(arr > 0))
+        return {
+            "count": len(arr),
+            "positive": positive,
+            "win_rate": round(positive / len(arr) * 100, 1),
+            "avg_return": round(float(np.mean(arr)), 2),
+            "median_return": round(float(np.median(arr)), 2),
+            "max_return": round(float(np.max(arr)), 2),
+            "min_return": round(float(np.min(arr)), 2),
+            "std": round(float(np.std(arr)), 2),
+        }
+
+    def get_factor_effectiveness(self, days: int = 60) -> dict:
+        """
+        分析因子有效性：计算各因子与 T+2 收益率的相关性。
+        返回 {factor_name: corr_coefficient}
+        """
+        c = self.conn
+        rows = c.execute("""
+            SELECT f.composite_score, f.pe, f.pb, f.roe, f.gross_margin,
+                   f.debt_ratio, f.revenue_growth, f.profit_growth,
+                   f.momentum_20d, f.momentum_60d, f.rsi,
+                   f.volume_ratio, f.ma5_slope,
+                   v.return_pct
+            FROM factor_scores f
+            JOIN t2_verifications v ON f.code = v.code
+            WHERE f.created_at >= date('now', ?)
+              AND v.status = 'success'
+              AND v.return_pct IS NOT NULL
+        """, (f"-{days} days",)).fetchall()
+
+        if not rows:
+            return {}
+
+        import numpy as np
+        factors = [
+            "composite_score", "pe", "pb", "roe", "gross_margin",
+            "debt_ratio", "revenue_growth", "profit_growth",
+            "momentum_20d", "momentum_60d", "rsi",
+            "volume_ratio", "ma5_slope",
+        ]
+
+        data = {}
+        for factor in factors:
+            data[factor] = [r[factor] for r in rows if r[factor] is not None]
+
+        returns = [r["return_pct"] for r in rows]
+
+        correlations = {}
+        for factor, values in data.items():
+            if len(values) < 10:
+                correlations[factor] = None
+                continue
+            try:
+                corr = np.corrcoef(values, returns)[0, 1]
+                correlations[factor] = round(float(corr) if not np.isnan(corr) else 0, 4)
+            except Exception:
+                correlations[factor] = None
+
+        return correlations
+
+    def get_pick_performance(self, days: int = 30) -> pd.DataFrame:
+        """
+        获取近N天按 category 分组的选股表现汇总。
+        返回 DataFrame，包含 category / count / avg_score / t2_avg_return
+        """
+        c = self.conn
+        rows = c.execute("""
+            SELECT s.category,
+                   COUNT(DISTINCT s.code) AS stock_count,
+                   AVG(s.composite_score) AS avg_score,
+                   AVG(v.return_pct) AS t2_avg_return,
+                   SUM(CASE WHEN v.return_pct > 0 THEN 1 ELSE 0 END) AS t2_positive,
+                   COUNT(v.id) AS t2_count
+            FROM stock_picks s
+            LEFT JOIN t2_verifications v ON s.code = v.code
+                AND s.date = v.pick_date
+                AND v.status = 'success'
+            WHERE s.date >= date('now', ?)
+            GROUP BY s.category
+            ORDER BY s.category
+        """, (f"-{days} days",)).fetchall()
+
+        return pd.DataFrame([dict(r) for r in rows])
+
+    def search_picks(self, code: str = None, keyword: str = None,
+                     category: str = None, limit: int = 50) -> pd.DataFrame:
+        """
+        搜索历史选股记录。
+        code: 股票代码
+        keyword: 名称关键词
+        category: 分类（②A_质量榜/②B_短线榜等）
+        """
+        conditions = ["1=1"]
+        params = []
+
+        if code:
+            conditions.append("code = ?")
+            params.append(code)
+        if keyword:
+            conditions.append("name LIKE ?")
+            params.append(f"%{keyword}%")
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+
+        where = " AND ".join(conditions)
+        c = self.conn
+        rows = c.execute(
+            f"SELECT * FROM stock_picks WHERE {where} ORDER BY date DESC LIMIT ?",
+            params + [limit]
+        ).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+    # ============================================
+    #  统计方法
+    # ============================================
+
+    def get_latest_holdings(self) -> pd.DataFrame:
+        """获取最新的持仓快照。"""
+        c = self.conn
+        latest_date = c.execute(
+            "SELECT MAX(date) FROM holdings_snapshot"
+        ).fetchone()[0]
+
+        if not latest_date:
+            return pd.DataFrame()
+
+        rows = c.execute(
+            "SELECT * FROM holdings_snapshot WHERE date=? ORDER BY market_value DESC",
+            (latest_date,)
+        ).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+    def get_daily_summary(self, date_str: str = None) -> dict:
+        """获取某日（默认今天）的选股+持仓汇总。"""
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        c = self.conn
+
+        latest_run = c.execute(
+            "SELECT run_id FROM stock_picks WHERE date=? LIMIT 1",
+            (date_str,)
+        ).fetchone()
+
+        holding = c.execute(
+            "SELECT * FROM holdings_snapshot WHERE date=?",
+            (date_str,)
+        ).fetchall()
+
+        t2 = c.execute(
+            "SELECT * FROM t2_verifications WHERE pick_date=?",
+            (date_str,)
+        ).fetchall()
+
+        return {
+            "date": date_str,
+            "run_id": latest_run["run_id"] if latest_run else None,
+            "holdings_count": len(holding),
+            "holdings_total_value": sum(h["market_value"] for h in holding if h["market_value"]),
+            "t2_verifications": len(t2),
+        }
+
+
+# ---- 全局单例 ----
+_db_instance: Optional[StockDB] = None
+
+
+def get_db(db_path: str = "data_cache/a-stock-engine.db") -> StockDB:
+    """获取全局 StockDB 实例（单例）。"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = StockDB(db_path)
+    return _db_instance

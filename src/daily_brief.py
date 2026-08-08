@@ -14,6 +14,8 @@ import yaml
 from pathlib import Path
 from datetime import datetime
 
+import pandas as pd
+
 # 确保能 import 同目录模块
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -227,5 +229,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import pandas as pd  # generate_brief 中使用
     main()

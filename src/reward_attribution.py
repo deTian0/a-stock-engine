@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from westock_cli import get_cli, sector_of
 from local_price_loader import LocalPriceLoader
+from database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,23 @@ def main():
     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     result = attributor.calc_attribution(holdings, start_date)
     report = attributor.generate_report(result, start_date)
+
+    # 保存持仓快照到 SQLite
+    try:
+        db = get_db()
+        # 获取当前价格信息构建快照
+        snapshot_holdings = {}
+        for d in result.get("details", []):
+            code = d["code"]
+            snapshot_holdings[code] = {
+                "name": d["name"],
+                "shares": d["shares"],
+                "cost_price": d["cost_price"],
+            }
+        if snapshot_holdings:
+            db.save_holdings_snapshot(snapshot_holdings)
+    except Exception as e:
+        logger.warning(f"持仓快照入库失败: {e}")
 
     report_path = Path("briefs") / datetime.now().strftime("%Y-%m-%d") / "收益归因分析.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)

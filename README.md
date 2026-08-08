@@ -9,9 +9,10 @@ a-stock-engine/
 ├── config/
 │   └── config.yaml              # 配置文件（账户/环境/因子/输出）
 ├── src/
-│   ├── westock_cli.py           # westock-data CLI 共享封装（已修复重复代码问题）
+│   ├── westock_cli.py           # westock-data CLI 共享封装
 │   ├── kline_cache.py           # K线数据本地缓存
 │   ├── local_price_loader.py    # 统一价格数据加载器
+│   ├── database.py              # SQLite 数据持久化层（4张表）
 │   ├── multifactor.py           # 核心多因子选股引擎
 │   ├── daily_brief.py           # 盘前简报生成器（自动化入口）
 │   ├── verify_picks.py          # T+2推荐验证工具
@@ -109,20 +110,57 @@ westock-data 是 WorkBuddy 的内置技能，提供：
 
 数据缓存策略：本地缓存12小时，超时自动刷新。
 
+## SQLite 数据持久化
+
+系统内建 SQLite 数据库，自动保存所有选股结果、T+2 验证、持仓快照和因子评分。
+
+**数据库文件**: `data_cache/a-stock-engine.db`
+
+**4张核心表**:
+
+| 表 | 说明 | 写入时机 |
+|---|---|---|
+| `stock_picks` | 每次选股运行的完整结果 | `multifactor.run()` 自动触发 |
+| `t2_verifications` | T+2 验证逐笔记录 | `verify_picks.py` 验证后自动保存 |
+| `holdings_snapshot` | 每日持仓快照 | 选股引擎 / 收益归因 自动保存 |
+| `factor_scores` | 每只股票因子评分明细 | 选股引擎 + 短线增强后保存 |
+
+**快捷查询**（可在 Python 中调用）:
+
+```python
+from src.database import get_db
+db = get_db()
+
+# 获取最近一次运行
+latest = db.get_latest_run()
+
+# 获取 T+2 验证统计
+t2_stats = db.get_t2_stats(days=30)
+
+# 获取因子有效性分析
+effectiveness = db.get_factor_effectiveness(days=60)
+
+# 搜索历史推荐
+picks = db.search_picks(code="601318", limit=20)
+```
+
 ## 已知问题 & 待办
 
-> 以下问题在原系统代码审查中已识别，本次重建已修复部分：
+> 重建后已修复的代码审查问题：
 
 | # | 问题 | 状态 | 说明 |
 |---|------|------|------|
 | 1 | bare except 泛滥 | ✅ 已修复 | 全部替换为具体异常类型 |
-| 2 | run_westock/_kill_process_tree 重复 | ✅ 已修复 | 抽取到 westock_cli.py 统一管理 |
+| 2 | run_westock/_kill_process_tree 重复 | ✅ 已修复 | 抽取到 westock_cli.py |
 | 3 | sector_of() 重复 | ✅ 已修复 | 统一到 westock_cli.py |
-| 4 | 研判文本stale bug | ✅ 已修复 | regime 直接从 assess_regime() 返回值取 |
-| 5 | 三大指数接口返回NA | ⚠️ 待验证 | 添加了容错处理和数据不足时的默认逻辑 |
-| 6 | CLI瞬时取数失败 | ⚠️ 待验证 | 添加了重试机制和缓存回退 |
-| 7 | 单元测试 | ❌ 待实现 | 需要补充 |
-| 8 | 因子参数需校准 | ❌ 待校准 | 原系统因子权重需要根据记忆重新调整 |
+| 4 | 研判文本stale bug | ✅ 已修复 | assess_regime() 直接返回 |
+| 5 | daily_brief pd 未导入 | ✅ 已修复 | import 移到文件顶部 |
+| 6 | sector 幽灵方法 | ✅ 已修复 | 添加 get_sector_list() |
+| 7 | fundamentals 缓存碰撞 | ✅ 已修复 | cache_key 改为 md5 hash |
+| 8 | SQLite 持久化 | ✅ 已实现 | 4张表，自动落库 |
+| 9 | 三大指数NA / CLI取数失败 | ⚠️ 待验证 | 已加容错，需实测 |
+| 10 | 单元测试 | ❌ 待实现 | pytest 覆盖核心模块 |
+| 11 | 因子参数校准 | ❌ 待校准 | 因子权重需根据记忆调整 |
 
 ## 重建说明
 

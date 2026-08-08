@@ -17,6 +17,7 @@ import subprocess
 import sys
 import os
 import json
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -181,7 +182,7 @@ class WestockCLI:
 
     def get_fundamentals(self, codes: list[str]) -> pd.DataFrame:
         """获取股票基本面数据（PE/PB/ROE/毛利率/营收增速等）。"""
-        cache_key = f"fundamentals_{'_'.join(codes[:10])}_{len(codes)}"
+        cache_key = f"fundamentals_{hashlib.md5(','.join(sorted(codes)).encode()).hexdigest()[:12]}"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
@@ -209,6 +210,21 @@ class WestockCLI:
         data = json.loads(output)
         self._write_cache(cache_key, data)
         return data
+
+    def get_sector_list(self) -> pd.DataFrame:
+        """获取全板块行情数据（name/change_5d/change_20d/amount_change等）。"""
+        cache_key = "sector_list"
+        cached = self._read_cache(cache_key)
+        if cached:
+            return pd.DataFrame(cached)
+
+        output = run_westock(
+            ["query", "--type", "sector_list"],
+            timeout=self._timeout, max_retries=self._max_retries
+        )
+        data = json.loads(output)
+        self._write_cache(cache_key, data)
+        return pd.DataFrame(data)
 
 
 # ---- 全局单例 ----

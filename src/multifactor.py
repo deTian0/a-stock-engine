@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from westock_cli import get_cli, sector_of
 from local_price_loader import LocalPriceLoader
+from database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -459,10 +460,13 @@ class MultiFactorEngine:
     #  主运行入口
     # ========================================
 
-    def run(self) -> dict:
+    def run(self, save_to_db: bool = True) -> dict:
         """
         完整运行选股流程。
         返回包含所有结果和元数据的字典。
+
+        Args:
+            save_to_db: 是否保存结果到 SQLite（默认 True）
         """
         start_time = time.time()
         logger.info("=" * 60)
@@ -496,7 +500,7 @@ class MultiFactorEngine:
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")
 
-        return {
+        results = {
             "regime": regime_info,
             "l2_filtered_count": len(filtered),
             "l4_results": l4_results,
@@ -505,6 +509,30 @@ class MultiFactorEngine:
             "elapsed_seconds": round(elapsed, 1),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+        # 保存到 SQLite
+        if save_to_db:
+            try:
+                from enrich_short import enrich
+                db = get_db()
+
+                # 保存选股结果
+                run_id = db.save_run_results(results, categories)
+                results["run_id"] = run_id
+
+                # 短线增强后保存因子评分
+                enriched = enrich(l4_results, self.price_loader)
+                db.save_factor_scores(run_id, enriched)
+
+                # 保存持仓快照
+                if holdings:
+                    db.save_holdings_snapshot(holdings, l4_results)
+
+                logger.info(f"数据已入库: run_id={run_id}")
+            except Exception as e:
+                logger.warning(f"数据入库失败（不影响选股结果）: {e}")
+
+        return results
 
 
 # ---- 命令行入口 ----

@@ -38,11 +38,7 @@ class SectorRotationWatcher:
     def get_sector_data(self) -> pd.DataFrame:
         """获取各板块的行情数据。"""
         try:
-            output = self.cli.run_westock_if_available(
-                ["query", "--type", "sector_list"],
-                timeout=30
-            )
-            return pd.DataFrame(output)
+            return self.cli.get_sector_list()
         except Exception as e:
             logger.error(f"获取板块数据失败: {e}")
             return pd.DataFrame()

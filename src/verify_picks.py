@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from westock_cli import get_cli
 from local_price_loader import LocalPriceLoader
+from database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -97,15 +98,32 @@ def get_t_plus_2_return(price_loader: LocalPriceLoader, code: str,
         return {"code": code, "status": f"错误: {e}"}
 
 
-def verify_date(date_str: str, briefs_dir: Path) -> dict:
-    """验证某一天的推荐。"""
-    brief_path = briefs_dir / date_str / "盘前选股简报.md"
-    if not brief_path.exists():
-        return {"date": date_str, "error": "简报不存在", "picks": []}
+def verify_date(date_str: str, briefs_dir: Path = None) -> dict:
+    """验证某一天的推荐。优先从 SQLite 读取，回退到 Markdown 简报。"""
+    picks = []
 
-    picks = load_picks_from_brief(brief_path)
+    # 优先从 SQLite 读取
+    try:
+        db = get_db()
+        c = db.conn
+        rows = c.execute(
+            "SELECT DISTINCT code, name FROM stock_picks WHERE date=?",
+            (date_str,)
+        ).fetchall()
+        if rows:
+            picks = [{"code": r["code"], "name": r["name"]} for r in rows]
+            logger.info(f"从 SQLite 读取 {date_str} 的推荐: {len(picks)} 只")
+    except Exception as e:
+        logger.warning(f"从 SQLite 读取失败: {e}")
+
+    # 回退到 Markdown 简报
+    if not picks and briefs_dir:
+        brief_path = briefs_dir / date_str / "盘前选股简报.md"
+        if brief_path.exists():
+            picks = load_picks_from_brief(brief_path)
+
     if not picks:
-        return {"date": date_str, "error": "未提取到推荐", "picks": []}
+        return {"date": date_str, "error": "未找到推荐数据", "picks": []}
 
     price_loader = LocalPriceLoader()
     pick_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -213,10 +231,19 @@ def main():
 
     # 执行验证
     results = []
+    db = get_db()
     for date_str in dates_to_verify:
         logger.info(f"验证 {date_str}...")
         result = verify_date(date_str, briefs_dir)
         results.append(result)
+
+        # 保存到 SQLite
+        if "error" not in result and result["picks"]:
+            try:
+                db.save_t2_verification(date_str, result["picks"])
+                logger.info(f"T+2验证已入库: {date_str}")
+            except Exception as e:
+                logger.warning(f"T+2验证入库失败 {date_str}: {e}")
 
     # 生成报告
     report = generate_verification_report(results)
