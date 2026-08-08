@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from akshare_provider import AkshareProvider
 from database import get_db
+from guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -362,44 +363,59 @@ def main():
     parser.add_argument("--no-verify", action="store_true", help="跳过T+N验证")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    setup_protection()
+    setup_logging()
 
     if args.date:
         start, end = args.date, args.date
     elif args.start and args.end:
         start, end = args.start, args.end
+        # 验证日期顺序
+        try:
+            sd = datetime.strptime(start, "%Y-%m-%d")
+            ed = datetime.strptime(end, "%Y-%m-%d")
+            if sd > ed:
+                print("ERROR: --start 必须早于 --end")
+                return
+        except ValueError as e:
+            print(f"ERROR: 日期格式错误，需为 YYYY-MM-DD: {e}")
+            return
     else:
-        # 默认：最近30天
         end = datetime.now().strftime("%Y-%m-%d")
         start = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
         print(f"未指定区间，使用默认: {start} ~ {end}")
 
-    engine = BacktestEngine(top_n=args.top)
-    results = engine.run(start, end, verify=not args.no_verify)
+    try:
+        engine = BacktestEngine(top_n=args.top)
+        results = engine.run(start, end, verify=not args.no_verify)
 
-    # 保存结果
-    report = engine.generate_report(results)
-    report_path = Path("briefs") / f"回测报告_{start}_{end}.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report, encoding="utf-8")
+        report = engine.generate_report(results)
+        report_path = Path("briefs") / f"回测报告_{start}_{end}.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
 
-    # 保存原始数据
-    data_path = Path("briefs") / f"回测数据_{start}_{end}.json"
-    # 只保存摘要，避免文件过大
-    summary = {k: v for k, v in results.items() if k not in ("daily_results", "verify_results")}
-    summary["daily_results_count"] = len(results.get("daily_results", []))
-    data_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str),
-                         encoding="utf-8")
+        data_path = Path("briefs") / f"回测数据_{start}_{end}.json"
+        summary = {k: v for k, v in results.items()
+                   if k not in ("daily_results", "verify_results")}
+        summary["daily_results_count"] = len(results.get("daily_results", []))
+        data_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8"
+        )
 
-    print(f"\n回测完成:")
-    print(f"  报告: {report_path}")
-    print(f"  区间: {start} ~ {end}")
-    print(f"  交易日: {results['total_dates']} | 有效: {results['valid_dates']} | 推荐: {results['total_picks']}")
+        print(f"\n回测完成:")
+        print(f"  报告: {report_path}")
+        print(f"  区间: {start} ~ {end}")
+        print(f"  交易日: {results['total_dates']} | 有效: {results['valid_dates']} | 推荐: {results['total_picks']}")
+        stats = results.get("stats", {})
+        t1 = stats.get("t1_stats", {})
+        if t1:
+            print(f"  T+1 平均: {t1.get('avg', 0):+.2f}% | 胜率: {t1.get('win_rate', 0)}%")
 
-    stats = results.get("stats", {})
-    t1 = stats.get("t1_stats", {})
-    if t1:
-        print(f"  T+1 平均: {t1.get('avg', 0):+.2f}% | 胜率: {t1.get('win_rate', 0)}%")
+    except KeyboardInterrupt:
+        logger.warning("用户中断，正在清理...")
+    finally:
+        teardown_protection()
 
 
 if __name__ == "__main__":

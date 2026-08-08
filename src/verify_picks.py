@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from westock_cli import get_cli
 from local_price_loader import LocalPriceLoader
 from database import get_db
+from guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -201,11 +202,17 @@ def main():
     parser.add_argument("--end", help="结束日期 (YYYY-MM-DD)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    setup_protection()
 
     config_path = Path(__file__).parent.parent / "config/config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+
+    setup_logging(
+        log_file=config.get("logging", {}).get("file", "data_cache/engine.log"),
+        level=config.get("logging", {}).get("level", "INFO"),
+        console=config.get("logging", {}).get("console", True),
+    )
 
     briefs_dir = Path(config["output"]["brief_dir"])
 
@@ -221,38 +228,43 @@ def main():
     elif args.start and args.end:
         start = datetime.strptime(args.start, "%Y-%m-%d")
         end = datetime.strptime(args.end, "%Y-%m-%d")
+        if start > end:
+            print("ERROR: --start 必须早于 --end")
+            return
         current = start
         while current <= end:
             dates_to_verify.append(current.strftime("%Y-%m-%d"))
             current += timedelta(days=1)
     else:
         print("请指定验证日期: --date / --range / --start + --end")
-        sys.exit(1)
+        return
 
-    # 执行验证
-    results = []
-    db = get_db()
-    for date_str in dates_to_verify:
-        logger.info(f"验证 {date_str}...")
-        result = verify_date(date_str, briefs_dir)
-        results.append(result)
+    try:
+        results = []
+        db = get_db()
+        for date_str in dates_to_verify:
+            logger.info(f"验证 {date_str}...")
+            result = verify_date(date_str, briefs_dir)
+            results.append(result)
 
-        # 保存到 SQLite
-        if "error" not in result and result["picks"]:
-            try:
-                db.save_t2_verification(date_str, result["picks"])
-                logger.info(f"T+2验证已入库: {date_str}")
-            except Exception as e:
-                logger.warning(f"T+2验证入库失败 {date_str}: {e}")
+            if "error" not in result and result["picks"]:
+                try:
+                    db.save_t2_verification(date_str, result["picks"])
+                except Exception as e:
+                    logger.warning(f"T+2验证入库失败 {date_str}: {e}")
 
-    # 生成报告
-    report = generate_verification_report(results)
-    report_path = Path("briefs") / f"T2验证报告_{datetime.now().strftime('%Y%m%d')}.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report, encoding="utf-8")
+        report = generate_verification_report(results)
+        report_path = Path("briefs") / f"T2验证报告_{datetime.now().strftime('%Y%m%d')}.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
 
-    print(f"\n验证报告已生成: {report_path}")
-    print(report)
+        print(f"\n验证报告已生成: {report_path}")
+        print(report)
+
+    except KeyboardInterrupt:
+        logger.warning("用户中断，正在清理...")
+    finally:
+        teardown_protection()
 
 
 if __name__ == "__main__":

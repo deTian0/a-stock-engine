@@ -20,6 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 
 from westock_cli import get_cli
+from guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -140,21 +141,27 @@ class SectorRotationWatcher:
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    watcher = SectorRotationWatcher()
+    setup_protection()
+    setup_logging()
 
-    sector_df = watcher.get_sector_data()
-    sector_df = watcher.calc_sector_strength(sector_df)
-    rotation = watcher.identify_rotation(sector_df)
+    try:
+        watcher = SectorRotationWatcher()
+        sector_df = watcher.get_sector_data()
+        sector_df = watcher.calc_sector_strength(sector_df)
+        rotation = watcher.identify_rotation(sector_df)
+        report = watcher.generate_report(sector_df, rotation)
 
-    report = watcher.generate_report(sector_df, rotation)
+        today = datetime.now().strftime("%Y-%m-%d")
+        report_path = Path("briefs") / today / "板块轮动监控.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    report_path = Path("briefs") / today / "板块轮动监控.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report, encoding="utf-8")
+        print(f"板块轮动监控报告已生成: {report_path}")
 
-    print(f"板块轮动监控报告已生成: {report_path}")
+    except KeyboardInterrupt:
+        logger.warning("用户中断，正在清理...")
+    finally:
+        teardown_protection()
 
 
 if __name__ == "__main__":

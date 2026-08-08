@@ -21,28 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from multifactor import MultiFactorEngine
 from database import get_db
+from guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
-
-
-def setup_logging(config: dict):
-    """配置日志。"""
-    log_cfg = config.get("logging", {})
-    level = getattr(logging, log_cfg.get("level", "INFO"))
-    log_file = log_cfg.get("file", "data_cache/engine.log")
-    console = log_cfg.get("console", True)
-
-    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-
-    handlers = [logging.FileHandler(log_file, encoding="utf-8")]
-    if console:
-        handlers.append(logging.StreamHandler())
-
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=handlers,
-    )
 
 
 def generate_brief(results: dict, config: dict) -> str:
@@ -197,49 +178,51 @@ def save_brief(content: str, config: dict) -> Path:
 
 def main():
     """主入口：运行引擎 → 生成简报 → 保存文件。"""
-    config_path = "config/config.yaml"
-    config_path = Path(__file__).parent.parent / config_path
+    setup_protection()
 
+    config_path = Path(__file__).parent.parent / "config/config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    setup_logging(config)
-    logger.info("=" * 60)
-    logger.info("盘前选股简报生成器启动")
-    logger.info("=" * 60)
+    setup_logging(
+        log_file=config.get("logging", {}).get("file", "data_cache/engine.log"),
+        level=config.get("logging", {}).get("level", "INFO"),
+        console=config.get("logging", {}).get("console", True),
+    )
 
-    # 运行选股引擎（传入已加载的 config，避免重复读取文件）
-    engine = MultiFactorEngine(config_dict=config)
-    results = engine.run()
-
-    if "error" in results:
-        logger.error(f"引擎运行失败: {results['error']}")
-        print(f"ERROR: {results['error']}")
-        sys.exit(1)
-
-    # 生成简报
-    brief_content = generate_brief(results, config)
-
-    # 保存简报
-    brief_path = save_brief(brief_content, config)
-
-    # 输出摘要
-    print(f"\n{'='*60}")
-    print(f"盘前选股简报已生成: {brief_path}")
-    print(f"市场环境: {results['regime']['regime']} (仓位上限 {results['regime']['position_cap']:.0%})")
-    for cat_name, cat_df in results["categories"].items():
-        count = len(cat_df) if cat_df is not None else 0
-        print(f"  {cat_name}: {count} 只")
-    print(f"耗时: {results['elapsed_seconds']}s")
-    print(f"{'='*60}")
-
-    # 确保数据库连接关闭
     try:
-        get_db().close()
-    except Exception:
-        pass
+        logger.info("=" * 60)
+        logger.info("盘前选股简报生成器启动")
+        logger.info("=" * 60)
 
-    return str(brief_path)
+        engine = MultiFactorEngine(config_dict=config)
+        results = engine.run()
+
+        if "error" in results:
+            logger.error(f"引擎运行失败: {results['error']}")
+            print(f"ERROR: {results['error']}")
+            sys.exit(1)
+
+        brief_content = generate_brief(results, config)
+        brief_path = save_brief(brief_content, config)
+
+        print(f"\n{'='*60}")
+        print(f"盘前选股简报已生成: {brief_path}")
+        print(f"市场环境: {results['regime']['regime']} (仓位上限 {results['regime']['position_cap']:.0%})")
+        for cat_name, cat_df in results["categories"].items():
+            count = len(cat_df) if cat_df is not None else 0
+            print(f"  {cat_name}: {count} 只")
+        print(f"耗时: {results['elapsed_seconds']}s")
+        print(f"{'='*60}")
+
+        return str(brief_path)
+
+    except KeyboardInterrupt:
+        logger.warning("用户中断 (Ctrl+C)，正在清理...")
+        return None
+
+    finally:
+        teardown_protection()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from westock_cli import get_cli, sector_of
 from local_price_loader import LocalPriceLoader
 from database import get_db
+from guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -188,41 +189,44 @@ class RewardAttribution:
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    setup_protection()
+    setup_logging()
 
-    attributor = RewardAttribution()
-    holdings = attributor.config.get("account", {}).get("holdings", {})
-
-    if not holdings:
-        print("请在 config.yaml 中配置 account.holdings 后运行")
-        sys.exit(1)
-
-    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    result = attributor.calc_attribution(holdings, start_date)
-    report = attributor.generate_report(result, start_date)
-
-    # 保存持仓快照到 SQLite
     try:
-        db = get_db()
-        # 获取当前价格信息构建快照
-        snapshot_holdings = {}
-        for d in result.get("details", []):
-            code = d["code"]
-            snapshot_holdings[code] = {
-                "name": d["name"],
-                "shares": d["shares"],
-                "cost_price": d["cost_price"],
-            }
-        if snapshot_holdings:
-            db.save_holdings_snapshot(snapshot_holdings)
-    except Exception as e:
-        logger.warning(f"持仓快照入库失败: {e}")
+        attributor = RewardAttribution()
+        holdings = attributor.config.get("account", {}).get("holdings", {})
 
-    report_path = Path("briefs") / datetime.now().strftime("%Y-%m-%d") / "收益归因分析.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report, encoding="utf-8")
+        if not holdings:
+            print("请在 config.yaml 中配置 account.holdings 后运行")
+            return
 
-    print(f"收益归因分析报告已生成: {report_path}")
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        result = attributor.calc_attribution(holdings, start_date)
+        report = attributor.generate_report(result, start_date)
+
+        # 保存持仓快照到 SQLite
+        try:
+            db = get_db()
+            snapshot_holdings = {}
+            for d in result.get("details", []):
+                code = d["code"]
+                snapshot_holdings[code] = {
+                    "name": d["name"], "shares": d["shares"], "cost_price": d["cost_price"],
+                }
+            if snapshot_holdings:
+                db.save_holdings_snapshot(snapshot_holdings)
+        except Exception as e:
+            logger.warning(f"持仓快照入库失败: {e}")
+
+        report_path = Path("briefs") / datetime.now().strftime("%Y-%m-%d") / "收益归因分析.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        print(f"收益归因分析报告已生成: {report_path}")
+
+    except KeyboardInterrupt:
+        logger.warning("用户中断，正在清理...")
+    finally:
+        teardown_protection()
 
 
 if __name__ == "__main__":

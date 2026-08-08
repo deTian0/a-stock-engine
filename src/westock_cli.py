@@ -125,7 +125,9 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
                     pass
 
         if attempt < max_retries:
-            time.sleep(1 * attempt)
+            wait = 2 ** (attempt - 1)  # 1s, 2s, 4s...
+            logger.debug(f"  等待 {wait}s 后重试...")
+            time.sleep(wait)
 
     raise RuntimeError(f"westock CLI 调用失败（重试 {max_retries} 次）: {last_error}")
 
