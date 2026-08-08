@@ -30,7 +30,7 @@ STOCK_BASIC = r"D:\Download\BaiduNetdiskDownload\A股数据\A股日线\stock_bas
 CHUNK_SIZE = 1000          # 每块行数
 FILE_SLEEP_SEC = 0.5       # 文件间休眠
 CHUNK_SLEEP_SEC = 0.05     # 块间休眠
-MAX_FILES = 3            # None=全部, or e.g. 10 for test
+MAX_FILES = None            # None=全部, or e.g. 10 for test
 
 
 def import_houfuquan(db, data_dir: str):
