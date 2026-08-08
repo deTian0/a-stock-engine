@@ -33,7 +33,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StockDB:
@@ -97,8 +97,12 @@ class StockDB:
             position_cap REAL,
             l2_filtered  INTEGER,
             elapsed_sec  REAL,
+            session_type TEXT    DEFAULT 'pre_market',
             created_at   TEXT    DEFAULT (datetime('now','localtime'))
         );
+
+        -- 为已有表升级（v3 新增列）
+        c.execute("ALTER TABLE stock_picks ADD COLUMN session_type TEXT DEFAULT 'pre_market'")
 
         CREATE TABLE IF NOT EXISTS t2_verifications (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +179,36 @@ class StockDB:
             expires_at    TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_market_type ON market_data_cache(data_type);
+
+        -- 板块轮动追踪（v3 新增）：记录每轮选股窗口
+        CREATE TABLE IF NOT EXISTS sector_rotation_tracking (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_start  TEXT    NOT NULL,
+            window_end    TEXT    NOT NULL,
+            session_type  TEXT    NOT NULL,
+            sector_name   TEXT    NOT NULL,
+            code          TEXT    NOT NULL,
+            name          TEXT,
+            asset_type    TEXT    DEFAULT 'stock',
+            score         REAL,
+            close_price   REAL,
+            pick_rank     INTEGER,
+            created_at    TEXT    DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_rot_window   ON sector_rotation_tracking(window_start, window_end);
+        CREATE INDEX IF NOT EXISTS idx_rot_sector   ON sector_rotation_tracking(sector_name, session_type);
+        CREATE INDEX IF NOT EXISTS idx_rot_code     ON sector_rotation_tracking(code);
+
+        -- 累计命中次数（v3 新增）：追踪每只股票被选中的历史
+        CREATE TABLE IF NOT EXISTS pick_frequency (
+            code          TEXT    NOT NULL,
+            session_type  TEXT    NOT NULL,
+            total_hits    INTEGER DEFAULT 0,
+            last_hit_date TEXT,
+            first_hit_date TEXT,
+            PRIMARY KEY (code, session_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pfreq_hits ON pick_frequency(total_hits DESC);
         """)
 
         c.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -185,9 +219,11 @@ class StockDB:
     #  写入方法
     # ============================================
 
-    def save_run_results(self, results: dict, categories: dict) -> int:
+    def save_run_results(self, results: dict, categories: dict,
+                         session_type: str = "pre_market") -> int:
         """
         保存一次选股运行的完整结果。
+        session_type: 'pre_market' 或 'post_market'
         返回本次运行的 run_id。
         """
         regime = results.get("regime", {})
@@ -214,18 +250,19 @@ class StockDB:
                     regime_name, cap,
                     results.get("l2_filtered_count", 0),
                     results.get("elapsed_seconds", 0),
+                    session_type,
                 ))
 
         if rows:
             c.executemany("""
                 INSERT INTO stock_picks
                 (run_id, date, code, name, category, composite_score, sector,
-                 regime, position_cap, l2_filtered, elapsed_sec)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                 regime, position_cap, l2_filtered, elapsed_sec, session_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """, rows)
             c.commit()
 
-        logger.info(f"选股结果已入库: run_id={run_id}, {len(rows)} 条记录")
+        logger.info(f"选股结果已入库: run_id={run_id}, {len(rows)} 条, session={session_type}")
         return run_id
 
     def save_factor_scores(self, run_id: int, enriched_df: pd.DataFrame,
@@ -665,6 +702,92 @@ class StockDB:
         if deleted > 0:
             logger.info(f"清理过期行情缓存: {deleted} 条")
         return deleted
+
+    # ============================================
+    #  板块轮动追踪（v3 新增）
+    # ============================================
+
+    def save_rotation_picks(self, picks: list[dict], window_start: str,
+                            window_end: str, session_type: str) -> int:
+        """保存一轮板块选股结果。"""
+        c = self.conn
+        rows = []
+        for p in picks:
+            rows.append((
+                window_start, window_end, session_type,
+                p.get("sector", "未知"), p.get("code", ""),
+                p.get("name", ""), p.get("asset_type", "stock"),
+                p.get("score", 0), p.get("close_price", 0),
+                p.get("rank", 0),
+            ))
+        if rows:
+            c.executemany("""
+                INSERT INTO sector_rotation_tracking
+                (window_start, window_end, session_type, sector_name, code, name,
+                 asset_type, score, close_price, pick_rank)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, rows)
+            c.commit()
+        logger.info(f"轮动追踪入库: {session_type} {window_start}~{window_end}, {len(rows)} 只")
+        return len(rows)
+
+    def upsert_pick_frequency(self, code: str, session_type: str) -> None:
+        """更新股票累计命中次数。"""
+        c = self.conn
+        today = datetime.now().strftime("%Y-%m-%d")
+        c.execute("""
+            INSERT INTO pick_frequency (code, session_type, total_hits, last_hit_date, first_hit_date)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(code, session_type) DO UPDATE SET
+                total_hits = total_hits + 1,
+                last_hit_date = ?
+        """, (code, session_type, today, today, today))
+        c.commit()
+
+    def get_rotation_window(self, sector: str = None, session_type: str = None,
+                            limit: int = 50) -> pd.DataFrame:
+        """查询轮动窗口内的选股记录。"""
+        c = self.conn
+        conds, params = [], []
+        if sector:
+            conds.append("sector_name = ?"); params.append(sector)
+        if session_type:
+            conds.append("session_type = ?"); params.append(session_type)
+        where = " AND ".join(conds) if conds else "1=1"
+        rows = c.execute(
+            f"SELECT * FROM sector_rotation_tracking WHERE {where} ORDER BY window_start DESC LIMIT ?",
+            params + [limit]
+        ).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+    def get_pick_frequency(self, session_type: str = None, min_hits: int = 1) -> pd.DataFrame:
+        """获取股票累计命中排行榜。"""
+        c = self.conn
+        conds = ["total_hits >= ?"]
+        params = [min_hits]
+        if session_type:
+            conds.append("session_type = ?")
+            params.append(session_type)
+        where = " AND ".join(conds)
+        rows = c.execute(
+            f"SELECT * FROM pick_frequency WHERE {where} ORDER BY total_hits DESC",
+            params
+        ).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+    def get_sector_hit_counts(self, window_start: str = None) -> dict:
+        """统计各板块近两周的命中只数。"""
+        c = self.conn
+        if window_start is None:
+            window_start = (datetime.now() - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        rows = c.execute("""
+            SELECT sector_name, COUNT(*) AS cnt
+            FROM sector_rotation_tracking
+            WHERE window_start >= ?
+            GROUP BY sector_name
+            ORDER BY cnt DESC
+        """, (window_start,)).fetchall()
+        return {r["sector_name"]: r["cnt"] for r in rows}
 
 
 # ---- 全局单例 ----

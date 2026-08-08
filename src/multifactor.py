@@ -555,13 +555,12 @@ class MultiFactorEngine:
     #  主运行入口
     # ========================================
 
-    def run(self, save_to_db: bool = True) -> dict:
+    def run(self, save_to_db: bool = True, session_type: str = "pre_market") -> dict:
         """
         完整运行选股流程。
-        返回包含所有结果和元数据的字典。
-
         Args:
             save_to_db: 是否保存结果到 SQLite（默认 True）
+            session_type: 'pre_market' 或 'post_market'
         """
         start_time = time.time()
         logger.info("=" * 60)
@@ -611,7 +610,7 @@ class MultiFactorEngine:
                 db = get_db()
 
                 # 保存选股结果
-                run_id = db.save_run_results(results, categories)
+                run_id = db.save_run_results(results, categories, session_type)
                 results["run_id"] = run_id
 
                 # 短线增强后保存因子评分
