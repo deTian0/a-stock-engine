@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -35,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from westock_cli import get_cli, sector_of
 from local_price_loader import LocalPriceLoader
 from database import get_db
+from enrich_short import enrich
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +44,11 @@ logger = logging.getLogger(__name__)
 class MultiFactorEngine:
     """多因子选股引擎。"""
 
-    def __init__(self, config_path: str = "config/config.yaml"):
-        self.config = self._load_config(config_path)
+    def __init__(self, config_path: str = "config/config.yaml", config_dict: dict = None):
+        if config_dict is not None:
+            self.config = config_dict
+        else:
+            self.config = self._load_config(config_path)
         self.cli = get_cli()
         self.price_loader = LocalPriceLoader(
             cache_dir=self.config["data_source"]["cache_dir"]
@@ -212,6 +217,47 @@ class MultiFactorEngine:
         return df.reset_index(drop=True)
 
     # ========================================
+    def _extract_fundamentals(self, fund_row) -> dict:
+        """从单行基本面数据提取因子值。"""
+        row = fund_row
+        return {
+            "pe": float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 999,
+            "pb": float(row.get("pb", 0)) if pd.notna(row.get("pb")) else 999,
+            "roe": float(row.get("roe", 0)) if pd.notna(row.get("roe")) else 0,
+            "gross_margin": float(row.get("gross_margin", 0)) if pd.notna(row.get("gross_margin")) else 0,
+            "debt_ratio": float(row.get("debt_ratio", 100)) if pd.notna(row.get("debt_ratio")) else 100,
+            "revenue_growth": float(row.get("revenue_growth", 0)) if pd.notna(row.get("revenue_growth")) else 0,
+            "profit_growth": float(row.get("profit_growth", 0)) if pd.notna(row.get("profit_growth")) else 0,
+            "market_cap": float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0,
+            "name": str(row.get("name", "")) if "name" in row else "",
+        }
+
+    def _fetch_stock_data(self, code: str, fund_lookup: dict, sector_map: dict) -> dict:
+        """获取单只股票的数据（价格+基本面+板块），用于并发调用。"""
+        factor_values = {"code": code}
+
+        # 从预构建的基本面字典中提取
+        if code in fund_lookup:
+            factor_values.update(fund_lookup[code])
+
+        # 获取价格数据计算动量
+        try:
+            price_df = self.price_loader.get_price(code, days=70)
+            if len(price_df) >= 60:
+                factor_values["momentum_20d"] = self.price_loader.calc_momentum(price_df, 20)
+                factor_values["momentum_60d"] = self.price_loader.calc_momentum(price_df, 60)
+            else:
+                factor_values["momentum_20d"] = 0.0
+                factor_values["momentum_60d"] = 0.0
+        except Exception:
+            factor_values["momentum_20d"] = 0.0
+            factor_values["momentum_60d"] = 0.0
+
+        # 板块信息
+        factor_values["sector"] = sector_map.get(code, "未知")
+
+        return factor_values
+
     #  L4: 多因子评分
     # ========================================
 
@@ -220,9 +266,9 @@ class MultiFactorEngine:
         L4 多因子评分：对通过 L2 的股票进行综合评分排序。
 
         评分流程:
-        1. 获取每只股票的价格数据和基本面数据
-        2. 计算各因子值
-        3. 按权重加权得到综合评分
+        1. 批量获取基本面数据
+        2. 并发获取所有股票价格数据（ThreadPoolExecutor, 8 workers）
+        3. 计算各因子值 + 加权综合评分
         4. 按评分降序排列
         """
         cfg = self.config["factor_l4"]
@@ -234,61 +280,54 @@ class MultiFactorEngine:
             return pd.DataFrame()
 
         codes = candidates["code"].tolist() if "code" in candidates.columns else []
-        logger.info(f"L4 评分: 开始处理 {len(codes)} 只股票...")
+        total = len(codes)
+        logger.info(f"L4 评分: 开始处理 {total} 只股票...")
 
-        # 获取基本面数据
+        # Step 1: 批量获取基本面数据
         try:
             fundamentals = self.cli.get_fundamentals(codes)
+            logger.info(f"  基本面数据获取完成: {len(fundamentals)} 条")
         except Exception as e:
             logger.error(f"获取基本面数据失败: {e}")
             fundamentals = pd.DataFrame()
 
-        # 逐只计算因子
-        scores = []
-        for i, code in enumerate(codes):
-            if (i + 1) % 50 == 0:
-                logger.info(f"  L4 进度: {i+1}/{len(codes)}")
+        # 构建基本面查找字典
+        fund_lookup = {}
+        if len(fundamentals) > 0 and "code" in fundamentals.columns:
+            for _, row in fundamentals.iterrows():
+                code = str(row.get("code", ""))
+                fund_lookup[code] = self._extract_fundamentals(row)
 
-            factor_values = {"code": code}
+        # Step 2: 预加载板块映射（避免并发中重复CLI调用）
+        sector_map = self.sector_mapping
 
-            # 从基本面数据中提取
-            if len(fundamentals) > 0:
-                fund_row = fundamentals[fundamentals["code"] == code]
-                if len(fund_row) > 0:
-                    row = fund_row.iloc[0]
-                    factor_values["pe"] = float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 999
-                    factor_values["pb"] = float(row.get("pb", 0)) if pd.notna(row.get("pb")) else 999
-                    factor_values["roe"] = float(row.get("roe", 0)) if pd.notna(row.get("roe")) else 0
-                    factor_values["gross_margin"] = float(row.get("gross_margin", 0)) if pd.notna(row.get("gross_margin")) else 0
-                    factor_values["debt_ratio"] = float(row.get("debt_ratio", 100)) if pd.notna(row.get("debt_ratio")) else 100
-                    factor_values["revenue_growth"] = float(row.get("revenue_growth", 0)) if pd.notna(row.get("revenue_growth")) else 0
-                    factor_values["profit_growth"] = float(row.get("profit_growth", 0)) if pd.notna(row.get("profit_growth")) else 0
-                    factor_values["market_cap"] = float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0
-                    if "name" in row:
-                        factor_values["name"] = row["name"]
+        # Step 3: 并发获取价格数据
+        max_workers = min(8, total)
+        logger.info(f"  并发获取价格数据: {max_workers} workers, {total} 只股票...")
 
-            # 从价格数据计算动量
-            try:
-                price_df = self.price_loader.get_price(code, days=70)
-                if len(price_df) >= 60:
-                    factor_values["momentum_20d"] = self.price_loader.calc_momentum(price_df, 20)
-                    factor_values["momentum_60d"] = self.price_loader.calc_momentum(price_df, 60)
-                else:
-                    factor_values["momentum_20d"] = 0.0
-                    factor_values["momentum_60d"] = 0.0
-            except Exception as e:
-                logger.debug(f"获取价格数据失败 {code}: {e}")
-                factor_values["momentum_20d"] = 0.0
-                factor_values["momentum_60d"] = 0.0
+        factor_list = []
+        completed = 0
 
-            # 补充板块信息
-            factor_values["sector"] = sector_of(code, self.sector_mapping)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._fetch_stock_data, code, fund_lookup, sector_map): code
+                for code in codes
+            }
 
-            scores.append(factor_values)
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    factor_list.append(result)
+                except Exception as e:
+                    code = futures[future]
+                    logger.debug(f"并发取数失败 {code}: {e}")
 
-        scores_df = pd.DataFrame(scores)
+                completed += 1
+                if completed % 100 == 0 or completed == total:
+                    logger.info(f"  L4 进度: {completed}/{total}")
 
-        # 计算综合评分
+        # Step 4: 计算综合评分
+        scores_df = pd.DataFrame(factor_list)
         scores_df = self._calc_composite_score(scores_df, factors_cfg)
 
         # 按评分降序排列，取前N
@@ -513,7 +552,6 @@ class MultiFactorEngine:
         # 保存到 SQLite
         if save_to_db:
             try:
-                from enrich_short import enrich
                 db = get_db()
 
                 # 保存选股结果

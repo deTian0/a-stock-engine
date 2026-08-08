@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,18 @@ class StockDB:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def commit(self):
+        """显式提交事务。"""
+        if self._conn is not None:
+            self._conn.commit()
 
     def _init_schema(self):
         """建表（如果不存在）。"""
@@ -173,8 +186,6 @@ class StockDB:
         today = datetime.now().strftime("%Y-%m-%d")
         c = self.conn
 
-        # 获取一个新的 run_id
-        c.execute("SELECT COALESCE(MAX(run_id), 0) + 1 AS next_id FROM stock_picks")
         run_id = c.execute("SELECT COALESCE(MAX(run_id), 0) + 1 FROM stock_picks").fetchone()[0]
 
         rows = []
@@ -210,8 +221,6 @@ class StockDB:
                            l4_df: pd.DataFrame = None) -> int:
         """
         保存因子评分明细。
-        enriched_df: 来自 enrich_short.py 的增强数据
-        l4_df: 来自 multifactor.py 的 L4 数据（如果 enriched_df 没有完整字段）
         """
         c = self.conn
 
@@ -220,17 +229,17 @@ class StockDB:
             logger.warning("factor_scores: 数据缺少 code 列")
             return 0
 
+        def _f(key, default=0.0):
+            v = row.get(key)
+            return float(v) if v is not None and pd.notna(v) else default
+
+        def _s(key, default=""):
+            v = row.get(key)
+            return str(v) if v is not None and pd.notna(v) else default
+
         rows = []
         for _, row in df.iterrows():
             code = row.get("code", "")
-
-            def _f(key, default=0.0):
-                v = row.get(key)
-                return float(v) if v is not None and pd.notna(v) else default
-
-            def _s(key, default=""):
-                v = row.get(key)
-                return str(v) if v is not None and pd.notna(v) else default
 
             rows.append((
                 run_id, code, _s("name", code),
@@ -418,7 +427,6 @@ class StockDB:
                     "avg_return": 0, "median_return": 0,
                     "max_return": 0, "min_return": 0, "std": 0}
 
-        import numpy as np
         arr = np.array(returns)
         positive = int(np.sum(arr > 0))
         return {
@@ -454,7 +462,6 @@ class StockDB:
         if not rows:
             return {}
 
-        import numpy as np
         factors = [
             "composite_score", "pe", "pb", "roe", "gross_margin",
             "debt_ratio", "revenue_growth", "profit_growth",

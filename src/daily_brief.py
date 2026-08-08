@@ -20,6 +20,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 
 from multifactor import MultiFactorEngine
+from database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,14 @@ def generate_brief(results: dict, config: dict) -> str:
         lines.append("|------|------|----------|------|------|")
         for _, row in holdings.iterrows():
             score = row.get("composite_score", 0)
-            median = results["l4_results"]["composite_score"].median() if len(results["l4_results"]) > 0 else 50
+            l4 = results.get("l4_results", pd.DataFrame())
+            if len(l4) > 0 and "composite_score" in l4.columns:
+                median_val = l4["composite_score"].median()
+                if pd.isna(median_val):
+                    median_val = 50
+            else:
+                median_val = 50
+            median = median_val
             advice = "⚠️ 关注" if score < median else "✅ 持有"
             lines.append(
                 f"| {row['code']} | {row.get('name', row['code'])} | "
@@ -200,8 +208,8 @@ def main():
     logger.info("盘前选股简报生成器启动")
     logger.info("=" * 60)
 
-    # 运行选股引擎
-    engine = MultiFactorEngine(config_path=str(config_path))
+    # 运行选股引擎（传入已加载的 config，避免重复读取文件）
+    engine = MultiFactorEngine(config_dict=config)
     results = engine.run()
 
     if "error" in results:
@@ -224,6 +232,12 @@ def main():
         print(f"  {cat_name}: {count} 只")
     print(f"耗时: {results['elapsed_seconds']}s")
     print(f"{'='*60}")
+
+    # 确保数据库连接关闭
+    try:
+        get_db().close()
+    except Exception:
+        pass
 
     return str(brief_path)
 
