@@ -19,9 +19,8 @@ class SelectorService:
     """选股服务 — 封装数据库访问 + 评分逻辑。"""
 
     def __init__(self):
-        db_path = str(Path(__file__).parent.parent.parent / "data_cache" / "market.db")
-        self.db = get_market_db(str(db_path))
-        self.raw_conn = sqlite3.connect(str(db_path))
+        self.db = get_market_db()  # 使用默认路径 data_cache/market.db
+        self.raw_conn = sqlite3.connect(str(self.db.db_path))
 
     def get_latest_date(self) -> str:
         row = self.raw_conn.execute("SELECT MAX(date) FROM daily_price").fetchone()

@@ -1,11 +1,12 @@
 """
 A股多因子选股系统 — Flask 后端
 """
-import sys
+import sys, os
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).parent          # api/
 PROJECT_DIR = BACKEND_DIR.parent             # a-stock-engine/
+os.chdir(str(PROJECT_DIR))                    # 固定 CWD 到项目根
 sys.path.insert(0, str(PROJECT_DIR))          # 让 import api.xxx 工作
 sys.path.insert(0, str(PROJECT_DIR / "src"))  # 复用引擎模块
 
