@@ -556,7 +556,7 @@ def main():
     try:
         # === 资金模拟 ===
         logger.info("\n" + "=" * 60)
-        logger.info(f"资金模拟: 初始 {INITIAL_CAPITAL:,} 元, 日选 {MAX_PICKS_PER_DAY} 只, 持有 {HOLD_DAYS} 天")
+        logger.info(f"资金模拟: 初始 {INITIAL_CAPITAL:,} 元, 日选 {MAX_PICKS_PER_DAY} 只, 动态持仓 3-10天")
         logger.info("=" * 60)
         pf = bt.run_portfolio()
 
