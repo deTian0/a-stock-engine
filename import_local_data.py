@@ -53,7 +53,8 @@ def import_houfuquan(db, data_dir: str):
             usecols = [
                 "日期", "代码", "名称", "所属行业",
                 "收盘价", "滚动市盈率", "市净率",
-                "总市值（元）", "流通市值（元）", "成交量（股）", "换手率", "涨幅%"
+                "总市值（元）", "流通市值（元）", "成交量（股）", "换手率", "涨幅%",
+                "3日涨幅%", "6日涨幅%", "10日涨幅%", "25日涨幅%", "振幅%"
             ]
             df = pd.read_csv(fpath, encoding="utf-8", usecols=usecols, dtype={"代码": str})
             df["代码"] = df["代码"].str.zfill(6)
@@ -64,6 +65,9 @@ def import_houfuquan(db, data_dir: str):
                 "总市值（元）": "market_cap", "流通市值（元）": "float_cap",
                 "成交量（股）": "volume", "换手率": "turnover",
                 "涨幅%": "change_pct",
+                "3日涨幅%": "chg_3d", "6日涨幅%": "chg_6d",
+                "10日涨幅%": "chg_10d", "25日涨幅%": "chg_25d",
+                "振幅%": "amplitude",
             })
 
             # 分块写入 SQLite
