@@ -35,20 +35,29 @@ MAX_FILES = None            # None=全部, or e.g. 10 for test
 
 
 def import_houfuquan(db, data_dir: str):
-    """导入后复权日截面数据。"""
+    """导入后复权日截面数据（支持断点续传）。"""
     csv_dir = Path(data_dir)
     files = sorted(csv_dir.rglob("*.csv"), key=lambda p: (p.parent.name, p.name))
     if MAX_FILES:
         files = files[:MAX_FILES]
 
-    logger.info(f"后复权数据: {len(files)} 个文件")
-    total_rows = 0
+    # 检查已导入
+    c = db.conn
+    existing = set(r[0].replace("daily_snapshot_", "") for r in
+                   c.execute("SELECT cache_key FROM market_data_cache WHERE data_type='daily_snapshot'").fetchall())
+
+    logger.info(f"后复权数据: {len(files)} 个文件 (已导入 {len(existing)} 天)")
+    total_rows, skipped = 0, 0
 
     for fi, fpath in enumerate(files):
         fname = fpath.stem
         date_str = fname.split("_")[0]  # "2026-01-05"
-        logger.info(f"  [{fi+1}/{len(files)}] {date_str}...")
 
+        if date_str in existing:
+            skipped += 1
+            continue
+
+        logger.info(f"  [{fi+1}/{len(files)}] {date_str}...")
         try:
             # 只读需要的列（注意精确列名）
             usecols = [
@@ -86,7 +95,7 @@ def import_houfuquan(db, data_dir: str):
         # CPU 保护
         time.sleep(FILE_SLEEP_SEC)
 
-    logger.info(f"后复权导入完成: {total_rows} 行")
+    logger.info(f"后复权导入完成: +{total_rows} 行 (跳过 {skipped})")
     return total_rows
 
 
@@ -150,26 +159,33 @@ def import_stock_basic(db):
 
 
 def import_parquet_prices(db, base_dir: str):
-    """导入 parquet 日线价格数据 → daily_price 表 (CPU安全)。"""
-    import glob
+    """导入 parquet 日线价格数据（支持断点续传）。"""
     base = Path(base_dir)
-    files = sorted(base.rglob("*.parquet"))
+    files = sorted(base.rglob("*.parquet"), key=lambda p: str(p))
     if MAX_FILES:
         files = files[:MAX_FILES]
 
-    logger.info(f"Parquet 价格数据: {len(files)} 个文件")
-    total_rows = 0
+    # 检查已导入日期，跳过
+    c = db.conn
+    existing = set(r[0] for r in c.execute("SELECT DISTINCT date FROM daily_price").fetchall())
+
+    logger.info(f"Parquet 价格数据: {len(files)} 文件 (已导入 {len(existing)} 天)")
+    total_rows, skipped, failed = 0, 0, 0
 
     for fi, fpath in enumerate(files):
+        date_str = fpath.stem[:8]
+        date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+        if date_str in existing:
+            skipped += 1
+            continue
+
         try:
             df = pd.read_parquet(str(fpath), columns=["code", "close", "pct_chg", "vol", "amount"])
             if len(df) == 0:
                 continue
 
             df["code"] = df["code"].astype(str).str.zfill(6)
-            date_str = fpath.stem[:8]  # "20260105"
-            date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-
             rows = [
                 (str(r.code), date_str,
                  float(r.close) if pd.notna(r.close) else 0.0,
@@ -184,15 +200,15 @@ def import_parquet_prices(db, base_dir: str):
                 total_rows += len(rows)
 
             if (fi + 1) % 50 == 0:
-                logger.info(f"  Parquet 进度: {fi+1}/{len(files)}")
-                time.sleep(0.1)
+                logger.info(f"  Parquet 进度: {fi+1}/{len(files)} (新增 {total_rows}, 跳过 {skipped})")
 
         except Exception as e:
-            logger.debug(f"  {fpath.name}: {e}")
+            failed += 1
+            logger.warning(f"  {fpath.name}: {e}")
 
-        time.sleep(0.05)  # CPU 保护
+        time.sleep(0.02)  # CPU 保护
 
-    logger.info(f"Parquet 导入完成: {total_rows} 行")
+    logger.info(f"Parquet 导入完成: +{total_rows} 行 (跳过 {skipped}, 失败 {failed})")
     return total_rows
 
 
