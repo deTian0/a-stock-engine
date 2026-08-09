@@ -833,13 +833,29 @@ class StockDB:
         return {r["code"]: r["close"] for r in rows}
 
 
-# ---- 全局单例 ----
-_db_instance: Optional[StockDB] = None
+# ---- 全局单例（双 DB：选股结果 + 行情数据） ----
+_sel_db: Optional[StockDB] = None
+_mkt_db: Optional[StockDB] = None
+
+DB_SELECTIONS = "data_cache/selections.db"
+DB_MARKET = "data_cache/market.db"
 
 
-def get_db(db_path: str = "data_cache/a-stock-engine.db") -> StockDB:
-    """获取全局 StockDB 实例（单例）。"""
-    global _db_instance
-    if _db_instance is None:
-        _db_instance = StockDB(db_path)
-    return _db_instance
+def get_db(db_path: str = None) -> StockDB:
+    """获取选股结果 DB（默认 selections.db）。"""
+    global _sel_db
+    if db_path is None:
+        db_path = DB_SELECTIONS
+    if _sel_db is None:
+        _sel_db = StockDB(db_path)
+    return _sel_db
+
+
+def get_market_db(db_path: str = None) -> StockDB:
+    """获取行情数据 DB（默认 market.db）。"""
+    global _mkt_db
+    if db_path is None:
+        db_path = DB_MARKET
+    if _mkt_db is None:
+        _mkt_db = StockDB(db_path)
+    return _mkt_db

@@ -22,7 +22,7 @@ import pandas as pd
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
-from database import get_db
+from database import get_db, get_market_db
 from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,9 @@ class LocalBacktest:
     """本地数据回测——SQLite Only。"""
 
     def __init__(self):
-        self.db = get_db("data_cache/a-stock-engine.db")
-        self.raw_conn = sqlite3.connect("data_cache/a-stock-engine.db")
+        self.sel_db = get_db()
+        self.db = get_market_db()
+        self.raw_conn = sqlite3.connect(self.db.db_path)
         self._dates_cache: Optional[list[str]] = None
         self._day_data_cache: dict[str, pd.DataFrame] = {}  # 缓存最近读取的日期数据
 
@@ -213,12 +214,12 @@ class LocalBacktest:
 
             # 入库
             if picks:
-                self.db.save_rotation_picks(
+                self.sel_db.save_rotation_picks(
                     picks, date_str, date_str, "backtest"
                 )
                 for p in picks:
                     try:
-                        self.db.upsert_pick_frequency(p["code"], "backtest")
+                        self.sel_db.upsert_pick_frequency(p["code"], "backtest")
                     except Exception:
                         pass
 
@@ -361,6 +362,7 @@ def main():
     except KeyboardInterrupt:
         logger.warning("用户中断")
     finally:
+        bt.sel_db.close()
         bt.db.close()
         logger.info("DB 已关闭")
 

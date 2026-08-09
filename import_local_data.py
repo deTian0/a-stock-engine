@@ -18,7 +18,7 @@ from datetime import datetime
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
-from database import get_db
+from database import get_market_db
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,7 @@ def main():
     logger.info("本地数据导入器启动 (CPU 安全模式)")
     logger.info("=" * 60)
 
-    db = get_db("data_cache/a-stock-engine.db")
+    db = get_market_db()
 
     try:
         t1 = import_stock_basic(db)
