@@ -40,7 +40,8 @@ T_PERIODS = [1, 3, 5]
 MARKET_MA = 60
 INITIAL_CAPITAL = 50000
 MAX_PICKS_PER_DAY = 20
-TRADE_COST = 0.0013          # 0.13% 交易成本 (万0.854免5佣金+印花税)
+TRADE_COST = 0.0013          # 0.13% 交易成本 (股票: 万0.854+印花税)
+ETF_COST = 0.00017           # 0.017% ETF交易成本 (免印花税)
 STOP_LOSS = 5.0              # 止损 (%)
 TARGET_BASE = 3.0            # 基础目标收益 (%)       # 单只股票最大占比 (%)
 
@@ -369,6 +370,14 @@ class LocalBacktest:
         return stats
 
 
+    @staticmethod
+    def _trade_cost(code: str, is_buy: bool = True) -> float:
+        """计算交易成本率。ETF 免印花税。"""
+        if code.startswith(("15", "51", "56", "58", "510", "512", "513", "515", "516",
+                            "517", "518", "560", "561", "562", "563", "588")):
+            return ETF_COST  # ETF 只有佣金，无印花税
+        return TRADE_COST
+
     def run_portfolio(self) -> dict:
         """资金模拟：5万起，每只有目标/止损，动态持仓周期。"""
         all_dates = self.get_available_dates()
@@ -419,7 +428,7 @@ class LocalBacktest:
                     reason = f"动量衰减({ret_pct:+.1f}%)"
 
                 if reason:
-                    cash += pos["shares"] * cur_price * (1 - TRADE_COST)  # 卖出扣成本
+                    cash += pos["shares"] * cur_price * (1 - self._trade_cost(code))  # 卖出
                     sell_log.append({
                         "code": code, "buy_p": pos["buy_price"], "sell_p": cur_price,
                         "held": held_days, "ret": round(ret_pct, 2), "reason": reason
@@ -470,7 +479,7 @@ class LocalBacktest:
                 if shares < 100:
                     continue
 
-                cost = shares * price * (1 + TRADE_COST)  # 买入扣成本
+                cost = shares * price * (1 + self._trade_cost(code, is_buy=True))  # 买入
                 if cost > cash * 0.5:
                     continue
 
@@ -498,7 +507,7 @@ class LocalBacktest:
         last_date = all_dates[-1]
         for code, pos in list(positions.items()):
             sp = self.get_price_on_date(code, last_date) or pos["buy_price"]
-            cash += pos["shares"] * sp * (1 - TRADE_COST)
+            cash += pos["shares"] * sp * (1 - self._trade_cost(code))  # 清仓
         total = cash
         portfolio.append((last_date, round(total, 2)))
 
