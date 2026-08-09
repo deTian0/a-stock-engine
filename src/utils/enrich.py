@@ -19,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from local_price_loader import LocalPriceLoader
+from data.local import LocalPriceLoader
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def enrich(l4_results: pd.DataFrame, price_loader: LocalPriceLoader = None) -> p
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     # 测试用
-    from multifactor import MultiFactorEngine
+    from engine.selection import MultiFactorEngine
     engine = MultiFactorEngine()
     results = engine.run()
     enriched = enrich(results["l4_results"])

@@ -4,7 +4,7 @@ factor_engine.py — 统一因子引擎（v2.1）
 所有模块共享的因子计算逻辑。单一入口，消除代码重复。
 
 用法:
-    from factor_engine import score_stocks
+    from engine.factors import score_stocks
 
     scored = score_stocks(df, weights=None)
     picks = pick_top_by_sector(scored, max_per_sector=5)

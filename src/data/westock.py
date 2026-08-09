@@ -5,7 +5,7 @@ westock_cli.py - westock-data CLI 共享封装模块
 抽取的公共 CLI 调用逻辑，消除重复代码。
 
 用法:
-    from westock_cli import WestockCLI
+    from data.westock import WestockCLI
     cli = WestockCLI(cache_dir="data_cache")
     df = cli.get_kline("000001", days=120)
     df = cli.get_index_kline("000001", days=60)
@@ -164,7 +164,7 @@ class WestockCLI:
         if src == "sina":
             if self._sina is None:
                 try:
-                    from sina_provider import get_sina
+                    from data.sina import get_sina
                     self._sina = get_sina()
                     logger.info("数据源: 新浪 API")
                 except ImportError:
@@ -208,7 +208,7 @@ class WestockCLI:
         """懒加载 akshare provider。"""
         if self._akshare is None:
             try:
-                from akshare_provider import get_akshare
+                from data.akshare import get_akshare
                 self._akshare = get_akshare()
                 logger.info("已启用 akshare 数据源作为后备")
             except ImportError:

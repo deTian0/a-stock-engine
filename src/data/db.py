@@ -9,7 +9,7 @@ database.py - SQLite 数据库层
   factor_scores     — 每只股票每次运行的因子评分明细
 
 用法:
-    from database import StockDB
+    from data.db import StockDB
     db = StockDB("data_cache/a-stock-engine.db")
 
     run_id = db.save_run_results(results, categories)

@@ -33,10 +33,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from westock_cli import get_cli
-from database import get_db
-from guard import setup_protection, teardown_protection, setup_logging
-from factor_engine import score_stocks as factor_score, pick_top_by_sector, filter_candidates
+from data.westock import get_cli
+from data.db import get_db
+from utils.guard import setup_protection, teardown_protection, setup_logging
+from engine.factors import score_stocks as factor_score, pick_top_by_sector, filter_candidates
 
 logger = logging.getLogger(__name__)
 

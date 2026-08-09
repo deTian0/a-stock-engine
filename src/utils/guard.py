@@ -8,7 +8,7 @@ guard.py - 全局保护性基础设施
   - 日志轮转配置
 
 用法:
-    from guard import setup_protection, teardown_protection
+    from utils.guard import setup_protection, teardown_protection
 
     def main():
         setup_protection()
@@ -58,7 +58,7 @@ def setup_protection():
 def teardown_protection():
     """清理资源：关闭 DB 连接。"""
     try:
-        from database import get_db
+        from data.db import get_db
         db = get_db()
         db.close()
         logger.debug("DB 连接已关闭")
@@ -116,7 +116,7 @@ def check_disk_space(data_dir: str = "data_cache", max_mb: int = 1024):
 
         # 清理 DB 过期缓存
         try:
-            from database import get_db
+            from data.db import get_db
             db = get_db()
             db.cache_clear_expired()
         except Exception as e:

@@ -146,7 +146,7 @@ if t3_returns:
 # 存结果到  SQLite
 print(f"\n保存结果到 SQLite...")
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
-from database import get_db
+from data.db import get_db
 db = get_db(str(Path(__file__).parent / 'data_cache' / 'a-stock-engine.db'))
 
 for d, picks in all_results.items():

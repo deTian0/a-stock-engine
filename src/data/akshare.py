@@ -5,7 +5,7 @@ akshare_provider.py - akshare 数据源
 所有数据自动缓存到 SQLite。
 
 用法:
-    from akshare_provider import AkshareProvider
+    from data.akshare import AkshareProvider
     provider = AkshareProvider()
     df = provider.get_stock_list()
     df = provider.get_kline("000001", days=120)
@@ -20,7 +20,7 @@ from typing import Optional
 
 import pandas as pd
 
-from database import get_db
+from data.db import get_db
 
 logger = logging.getLogger(__name__)
 

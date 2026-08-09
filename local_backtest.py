@@ -22,8 +22,8 @@ import pandas as pd
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
-from database import get_market_db
-from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
+from data.db import get_market_db
+from engine.factors import score_stocks, pick_top_by_sector, filter_candidates
 
 logger = logging.getLogger(__name__)
 

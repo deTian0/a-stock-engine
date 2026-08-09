@@ -19,8 +19,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from westock_cli import get_cli
-from guard import setup_protection, teardown_protection, setup_logging
+from data.westock import get_cli
+from utils.guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 

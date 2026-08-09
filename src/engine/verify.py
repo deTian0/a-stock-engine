@@ -23,10 +23,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from westock_cli import get_cli
-from local_price_loader import LocalPriceLoader
-from database import get_db
-from guard import setup_protection, teardown_protection, setup_logging
+from data.westock import get_cli
+from data.local import LocalPriceLoader
+from data.db import get_db
+from utils.guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 

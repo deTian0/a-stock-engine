@@ -20,9 +20,9 @@ import pandas as pd
 # 确保能 import 同目录模块
 sys.path.insert(0, str(Path(__file__).parent))
 
-from multifactor import MultiFactorEngine
-from database import get_db
-from guard import setup_protection, teardown_protection, setup_logging
+from engine.selection import MultiFactorEngine
+from data.db import get_db
+from utils.guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@
 """
 from pathlib import Path
 from flask import Blueprint, jsonify
-from database import get_market_db
+from data.db import get_market_db
 
 data_bp = Blueprint("data", __name__)
 

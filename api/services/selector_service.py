@@ -9,8 +9,8 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
-from database import get_market_db
-from factor_engine import score_stocks, filter_candidates, pick_top_by_sector
+from data.db import get_market_db
+from engine.factors import score_stocks, filter_candidates, pick_top_by_sector
 
 logger = logging.getLogger("selector.service")
 

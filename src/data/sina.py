@@ -5,7 +5,7 @@ sina_provider.py - 新浪财经数据源
 无需 token，无需安装额外包，纯 HTTP。
 
 用法:
-    from sina_provider import SinaProvider
+    from data.sina import SinaProvider
     provider = SinaProvider()
     df = provider.get_stock_list()
     df = provider.get_index_kline("000001", days=60)
@@ -21,7 +21,7 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
-from database import get_db
+from data.db import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class SinaProvider:
             return self._base_codes
 
         try:
-            from database import get_market_db
+            from data.db import get_market_db
             mkt = get_market_db()
             c = mkt.conn
             # 取最近一个交易日的所有股票代码
@@ -170,7 +170,7 @@ class SinaProvider:
     def _enrich_fundamentals(self, df: pd.DataFrame) -> pd.DataFrame:
         """从本地DB补充PE/PB/市值。"""
         try:
-            from database import get_market_db
+            from data.db import get_market_db
             mkt = get_market_db()
             c = mkt.conn
             latest = c.execute("SELECT MAX(date) FROM daily_price WHERE code LIKE '%.SZ' OR code LIKE '%.SH'").fetchone()[0]
@@ -202,7 +202,7 @@ class SinaProvider:
     def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> pd.DataFrame:
         """获取个股K线（从本地DB，新浪历史接口复杂）。"""
         try:
-            from database import get_market_db
+            from data.db import get_market_db
             mkt = get_market_db()
             c = mkt.conn
             sc = _sina_code(code).replace("sh", "").replace("sz", "")
@@ -231,7 +231,7 @@ class SinaProvider:
         # 新浪日报指数接口一次只能取当天
         # 折中方案：从 DB 读取指数日线
         try:
-            from database import get_market_db
+            from data.db import get_market_db
             mkt = get_market_db()
             c = mkt.conn
             sc = code.zfill(6)
@@ -284,7 +284,7 @@ class SinaProvider:
             return dict(zip(cached["code"], cached["sector"]))
 
         try:
-            from database import get_market_db
+            from data.db import get_market_db
             mkt = get_market_db()
             c = mkt.conn
             latest = c.execute("SELECT MAX(date) FROM daily_price").fetchone()[0]

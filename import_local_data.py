@@ -18,7 +18,7 @@ from datetime import datetime
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
-from database import get_market_db
+from data.db import get_market_db
 
 logger = logging.getLogger(__name__)
 
