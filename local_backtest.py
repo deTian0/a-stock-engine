@@ -36,7 +36,8 @@ MAX_PER_SECTOR = 5
 RISK_STOP_LOSS_PCT = 8.0       # T+1 止损线 (%)
 RISK_MAX_SECTOR_PCT = 20.0     # 单板块最大占比 (%)
 RISK_MAX_STOCK_PCT = 5.0
-T_PERIODS = [1, 3, 5]        # T+N 验证周期       # 单只股票最大占比 (%)
+T_PERIODS = [1, 3, 5]        # T+N 验证周期
+MARKET_MA = 60                # 择时均线，低于此线空仓       # 单只股票最大占比 (%)
 
 
 class LocalBacktest:
@@ -212,6 +213,23 @@ class LocalBacktest:
 
         logger.info(f"回测区间: {all_dates[0]} ~ {all_dates[-1]}, {len(all_dates)} 天")
 
+        # === 预计算市场择时信号 (MA60) ===
+        logger.info(f"计算择时信号 (MA{MARKET_MA})...")
+        c = self.raw_conn
+        market_avg = {}
+        for i, d in enumerate(all_dates):
+            r = c.execute("SELECT AVG(close) FROM daily_price WHERE date=?", (d,)).fetchone()
+            market_avg[d] = r[0] if r[0] else 0
+            if (i + 1) % 500 == 0:
+                logger.info(f"  均价: {i+1}/{len(all_dates)}")
+
+        avg_vals = [market_avg[d] for d in all_dates]
+        ma60 = [sum(avg_vals[max(0, i - MARKET_MA + 1):i + 1]) / min(i + 1, MARKET_MA)
+                for i in range(len(all_dates))]
+        market_regime = {all_dates[i]: avg_vals[i] > ma60[i] for i in range(len(all_dates))}
+        trade_days = sum(market_regime.values())
+        logger.info(f"择时: {trade_days}/{len(all_dates)} 天可交易 ({trade_days/len(all_dates)*100:.0f}%)")
+
         daily_records = []
         total_picks = 0
 
@@ -226,6 +244,10 @@ class LocalBacktest:
         for di, date_str in enumerate(all_dates):
             if (di + 1) % 100 == 0:
                 logger.info(f"  进度: {di+1}/{len(all_dates)}")
+
+            # 择时：市场在 MA60 以下 → 空仓
+            if not market_regime.get(date_str, True):
+                continue
 
             df = self.load_day_data(date_str)
             if len(df) == 0:
