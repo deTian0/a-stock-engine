@@ -37,7 +37,10 @@ RISK_STOP_LOSS_PCT = 8.0       # T+1 止损线 (%)
 RISK_MAX_SECTOR_PCT = 20.0     # 单板块最大占比 (%)
 RISK_MAX_STOCK_PCT = 5.0
 T_PERIODS = [1, 3, 5]        # T+N 验证周期
-MARKET_MA = 60                # 择时均线，低于此线空仓       # 单只股票最大占比 (%)
+MARKET_MA = 60                # 择时均线，低于此线空仓
+INITIAL_CAPITAL = 50000        # 初始资金（元）
+MAX_PICKS_PER_DAY = 20         # 每日最多持仓数
+HOLD_DAYS = 5                  # 持仓天数       # 单只股票最大占比 (%)
 
 
 class LocalBacktest:
@@ -344,6 +347,138 @@ class LocalBacktest:
         return stats
 
 
+    def run_portfolio(self) -> dict:
+        """资金模拟：5万起步，每日等权买入 Top N，持5天卖出。"""
+        all_dates = self.get_available_dates()
+        # Pre-compute market regime
+        c = self.raw_conn
+        market_avg = {}
+        for d in all_dates:
+            r = c.execute("SELECT AVG(close) FROM daily_price WHERE date=?", (d,)).fetchone()
+            market_avg[d] = r[0] or 0
+        avg_vals = [market_avg[d] for d in all_dates]
+        ma60 = [sum(avg_vals[max(0,i-MARKET_MA+1):i+1]) / min(i+1,MARKET_MA) for i in range(len(all_dates))]
+        regime = {all_dates[i]: avg_vals[i] > ma60[i] for i in range(len(all_dates))}
+
+        cash = float(INITIAL_CAPITAL)
+        positions = {}  # {code: (buy_price, shares, sell_date_str)}
+        portfolio = []  # [(date_str, total_value)], daily history
+
+        logger.info(f"资金模拟: 初始{cash:,.0f}元, 日选{MAX_PICKS_PER_DAY}只, 持有{HOLD_DAYS}天")
+
+        for di, date_str in enumerate(all_dates):
+            if (di + 1) % 200 == 0:
+                logger.info(f"  进度: {di+1}/{len(all_dates)}")
+
+            # 1. 卖出到期持仓
+            to_remove = []
+            for code, (bp, shares, sell_date) in positions.items():
+                if date_str >= sell_date:
+                    sell_price = self.get_price_on_date(code, date_str) or bp
+                    cash += shares * sell_price
+                    to_remove.append(code)
+            for code in to_remove:
+                del positions[code]
+
+            # 2. 计算当前总资产
+            total_val = cash
+            for code, (bp, shares, _) in positions.items():
+                cur_p = self.get_price_on_date(code, date_str) or bp
+                total_val += shares * cur_p
+            portfolio.append((date_str, round(total_val, 2)))
+
+            # 3. 择时：市场不行 → 不买
+            if not regime.get(date_str, True):
+                continue
+
+            # 4. 选股买入
+            df = self.load_day_data(date_str)
+            if len(df) == 0:
+                continue
+            df = self.filter_stocks(df)
+            df = self.score_stocks(df)
+            # 全市场 Top N（不按板块，资金有限）
+            top = df.head(MAX_PICKS_PER_DAY * 2)  # 多取一些，过滤已有持仓
+
+            buy_count = 0
+            for _, row in top.iterrows():
+                code = row["code"]
+                if code in positions:
+                    continue  # 已有持仓，跳过
+                price = float(row["close"]) if pd.notna(row.get("close")) else 0
+                if price <= 0:
+                    continue
+                alloc = cash / (MAX_PICKS_PER_DAY - buy_count) if (MAX_PICKS_PER_DAY - buy_count) > 0 else 0
+                shares = int(alloc / price / 100) * 100  # A股100股整数倍
+                if shares < 100:
+                    continue
+                cost = shares * price
+                if cost > cash * 0.5:
+                    continue  # 单只不超过50%仓位
+
+                cash -= cost
+                sell_date_idx = di + HOLD_DAYS
+                sell_date = all_dates[sell_date_idx] if sell_date_idx < len(all_dates) else all_dates[-1]
+                positions[code] = (price, shares, sell_date)
+                buy_count += 1
+                if buy_count >= MAX_PICKS_PER_DAY:
+                    break
+
+        # 清仓
+        last_date = all_dates[-1]
+        for code, (bp, shares, _) in list(positions.items()):
+            sp = self.get_price_on_date(code, last_date) or bp
+            cash += shares * sp
+        total_val = cash
+        portfolio.append((last_date, round(total_val, 2)))
+
+        # 统计
+        values = [v for _, v in portfolio]
+        returns = [(values[i] / values[i-1] - 1) for i in range(1, len(values)) if values[i-1] > 0]
+
+        # CAGR
+        years = len(values) / 252
+        cagr = (values[-1] / INITIAL_CAPITAL) ** (1 / years) - 1 if years > 0 and values[-1] > 0 else 0
+
+        # Max drawdown
+        peak = values[0]
+        max_dd = 0.0
+        for v in values:
+            if v > peak:
+                peak = v
+            dd = (peak - v) / peak if peak > 0 else 0
+            if dd > max_dd:
+                max_dd = dd
+
+        # Sharpe (risk-free = 2%)
+        ret_arr = np.array(returns) if returns else np.array([0])
+        rf_daily = 0.02 / 252
+        excess = ret_arr - rf_daily
+        sharpe = float(np.mean(excess) / np.std(excess) * np.sqrt(252)) if np.std(excess) > 0 else 0
+
+        # Annual return by year
+        yearly = {}
+        for d, v in portfolio:
+            y = d[:4]
+            yearly.setdefault(y, []).append(v)
+        year_returns = {}
+        for y, vals in yearly.items():
+            if vals[0] > 0:
+                year_returns[y] = round((vals[-1] / vals[0] - 1) * 100, 1)
+
+        return {
+            "initial": INITIAL_CAPITAL,
+            "final": round(values[-1], 2),
+            "return_pct": round((values[-1] / INITIAL_CAPITAL - 1) * 100, 2),
+            "cagr_pct": round(cagr * 100, 2),
+            "max_drawdown_pct": round(max_dd * 100, 2),
+            "sharpe": round(sharpe, 2),
+            "years": round(years, 1),
+            "year_returns": year_returns,
+            "portfolio": portfolio,
+        }
+
+
 def main():
     
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -354,43 +489,34 @@ def main():
     bt = LocalBacktest()
 
     try:
-        results = bt.run()
-        stats = results.get("stats", {})
-        stats_risk = results.get("stats_risk", {})
-        risk_sum = results.get("risk_summary", {})
+        # === 资金模拟 ===
+        logger.info("\n" + "=" * 60)
+        logger.info(f"资金模拟: 初始 {INITIAL_CAPITAL:,} 元, 日选 {MAX_PICKS_PER_DAY} 只, 持有 {HOLD_DAYS} 天")
+        logger.info("=" * 60)
+        pf = bt.run_portfolio()
 
         print(f"\n{'='*60}")
-        print(f"回测结果 v2.2 (含风控)")
+        print(f"资金模拟结果 ({pf['years']}年)")
         print(f"{'='*60}")
-        print(f"交易日: {results['total_dates']} | 有效日: {results['valid_dates']}")
-        print(f"风控: 移除 {risk_sum.get('removed', 0)} 只 (止损>{RISK_STOP_LOSS_PCT}% / 板块>{RISK_MAX_SECTOR_PCT}%)")
+        print(f"初始资金: ¥{pf['initial']:,.0f}")
+        print(f"最终资金: ¥{pf['final']:,.0f}")
+        print(f"总收益:   {pf['return_pct']:+.2f}%")
+        print(f"年化收益: {pf['cagr_pct']:+.2f}%")
+        print(f"最大回撤: {pf['max_drawdown_pct']:.1f}%")
+        print(f"夏普比率: {pf['sharpe']}")
 
-        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
-            s_raw = stats.get(period, {})
-            s_risk = stats_risk.get(period, {})
-            if s_raw:
-                print(f"\n{period}:")
-                print(f"  原始:  {s_raw['count']}笔 | 均:{s_raw['avg']:+.2f}% | 胜率:{s_raw['win_rate']}%")
-                if s_risk:
-                    print(f"  风控:  {s_risk['count']}笔 | 均:{s_risk['avg']:+.2f}% | 胜率:{s_risk['win_rate']}%")
+        if pf.get("year_returns"):
+            print(f"\n逐年收益:")
+            for y, r in sorted(pf["year_returns"].items()):
+                print(f"  {y}: {r:+.1f}%")
 
-        most = stats.get("most_picked", [])
-        if most:
-            print(f"\n高频推荐 Top 10:")
-            for item in most[:10]:
-                print(f"  {item['code']}: {item['hits']} 次")
-
-        # 保存报告
-        report = [f"# 回测报告\n> 区间: 2026-01-05 ~ 2026-05-14\n"]
-        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
-            if period in stats:
-                s = stats[period]
-                report.append(f"\n## {period}\n- 样本: {s['count']} | 平均: {s['avg']:+.2f}% | 胜率: {s['win_rate']}%\n")
-
-        rpath = Path("briefs") / f"回测报告_本地数据_{datetime.now().strftime('%Y%m%d')}.md"
-        rpath.parent.mkdir(parents=True, exist_ok=True)
-        rpath.write_text("\n".join(report), encoding="utf-8")
-        print(f"\n报告: {rpath}")
+        # 保存资产曲线
+        portfolio = pf.get("portfolio", [])
+        if portfolio:
+            csv_path = Path("briefs") / f"portfolio_curve_{datetime.now().strftime('%Y%m%d')}.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(portfolio, columns=["date", "value"]).to_csv(csv_path, index=False)
+            print(f"\n资产曲线: {csv_path}")
 
     except KeyboardInterrupt:
         logger.warning("用户中断")
