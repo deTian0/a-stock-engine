@@ -216,20 +216,20 @@ class MultiFactorEngine:
             except Exception as e:
                 logger.warning(f"上市日期过滤失败: {e}")
 
-        # 市值过滤
-        min_cap = cfg.get("min_market_cap", 0)
-        if min_cap > 0 and "market_cap" in df.columns:
+        # 市值过滤（仅当数据有效时）
+        min_cap = float(cfg.get("min_market_cap", 0))
+        if min_cap > 0 and "market_cap" in df.columns and df["market_cap"].gt(0).sum() > len(df) * 0.1:
             df = df[df["market_cap"] >= min_cap]
 
-        # PE 过滤
-        max_pe = cfg.get("max_pe", 9999)
-        if max_pe < 9999 and "pe" in df.columns:
+        # PE 过滤（仅当数据有效时）
+        max_pe = float(cfg.get("max_pe", 9999))
+        if max_pe < 9999 and "pe" in df.columns and df["pe"].gt(0).sum() > len(df) * 0.1:
             df = df[(df["pe"] > 0) & (df["pe"] <= max_pe)]
 
-        # 成交额过滤
-        min_amount = cfg.get("min_daily_amount", 0)
-        if min_amount > 0 and "amount" in df.columns:
-            df = df[df["amount"] >= min_amount * 1e8]  # 转为元
+        # 成交额过滤（仅当数据有效时）
+        min_amount = float(cfg.get("min_daily_amount", 0))
+        if min_amount > 0 and "amount" in df.columns and df["amount"].gt(0).sum() > len(df) * 0.1:
+            df = df[df["amount"] >= min_amount * 1e8]
 
         filtered_count = len(df)
         logger.info(f"L2 过滤: {original_count} → {filtered_count} (排除 {original_count - filtered_count})")

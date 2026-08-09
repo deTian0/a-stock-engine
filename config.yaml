@@ -10,17 +10,24 @@ data_source:
 
 env_regime:
   indices:                       # 参考指数
-    - 000001                     # 上证指数
-    - 399001                     # 深证成指
-    - 399006                     # 创业板指
-  bull_threshold: 0.6            # 多少指数站上MA60算多头
-  bear_threshold: 0.3            # 多少指数站上MA60算空头
-  bull_cap_pct: 100              # 多头仓位 (%)
-  bear_cap_pct: 20               # 空头仓位 (%)
-  neutral_cap_pct: 50            # 震荡仓位 (%)
+    - code: "000001"
+      name: "上证指数"
+    - code: "399001"
+      name: "深证成指"
+    - code: "399006"
+      name: "创业板指"
+  ma_short: 20                   # 短期均线
+  ma_long: 60                    # 长期均线
+  regime_thresholds:
+    bull_above_ma_ratio: 0.6     # 站上MA的指数比例 ≥ 此值 → 多头
+    bear_below_ma_ratio: 0.3     # 站上MA的指数比例 ≤ 此值 → 空头
+  position_caps:
+    bull: 1.0                    # 多头仓位
+    bear: 0.2                    # 空头仓位
+    neutral: 0.5                 # 震荡仓位
 
 filter_l2:
-  min_market_cap: 20e8           # 最小市值 (20亿)
+  min_market_cap: 2000000000     # 最小市值 (20亿)
   max_pe: 300                    # 最大PE
   min_close: 1                   # 最低股价
   exclude_st: true               # 排除ST
@@ -30,12 +37,18 @@ factor_l4:
   max_per_sector: 5              # 每板块最多
   max_picks: 50                  # 最多候选数
   factors:
-    value: 0.15                  # 价值因子权重 (PE/PB)
-    quality: 0.20                # 质量因子权重 (ROE/毛利率)
-    growth: 0.15                 # 成长因子权重 (营收增速)
-    momentum: 0.30               # 动量因子权重 (20日/60日涨跌)
-    volatility: 0.10             # 低波因子权重
-    size: 0.10                   # 规模因子权重
+    - name: value
+      weight: 0.15
+    - name: quality
+      weight: 0.20
+    - name: growth
+      weight: 0.15
+    - name: momentum
+      weight: 0.30
+    - name: volatility
+      weight: 0.10
+    - name: size
+      weight: 0.10
   initial_capital: 50000        # 初始资金（元）
   max_picks_per_day: 20         # 每日最多持仓
   min_cash_to_trade: 5000       # 现金低于此数不买入
@@ -64,5 +77,8 @@ universe:
   exclude_st: true              # 排除ST/退市
 
 output:
-  save_csv: true                # 保存资产曲线CSV
-  save_html: true               # 生成可视化HTML报告
+  save_csv: true
+  save_html: true
+  brief_dir: briefs
+  brief_filename: 盘前选股简报.md
+  date_based_archive: true
