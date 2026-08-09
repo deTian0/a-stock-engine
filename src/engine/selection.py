@@ -63,7 +63,7 @@ except (ValueError, OSError):
 class MultiFactorEngine:
     """多因子选股引擎。"""
 
-    def __init__(self, config_path: str = "config/config.yaml", config_dict: dict = None):
+    def __init__(self, config_path: str = "config.yaml", config_dict: dict = None):
         if config_dict is not None:
             self.config = config_dict
         else:
