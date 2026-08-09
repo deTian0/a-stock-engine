@@ -67,13 +67,14 @@ cd front && npm install && npm run dev  # → http://localhost:3000
 
 ```bash
 # 选股（新浪 API，实时数据）
-cd src
-python tasks/daily.py
+python -m src.tasks.daily
 
 # 回测（本地数据库）
 python local_backtest.py
 
-# API 直接调用
+# 直接运行（从项目根目录）
+cd src && python tasks/daily.py              # PowerShell/CMD
+cd src && python -m tasks.daily              # 推荐方式
 curl -X POST http://localhost:5000/api/select/run \
   -H "Content-Type: application/json" \
   -d '{"top_n":20}'
