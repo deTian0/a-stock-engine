@@ -28,8 +28,8 @@ from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
 logger = logging.getLogger(__name__)
 
 # === CPU 安全参数 ===
-DAY_SLEEP_SEC = 0.2
-BATCH_SLEEP_SEC = 0.05
+DAY_SLEEP_SEC = 0.05    # 1523天，要快一点
+BATCH_SLEEP_SEC = 0.1   # 每50天休息一下
 MAX_PER_SECTOR = 5
 
 # === 风控参数（v2.2 新增） ===
@@ -45,40 +45,76 @@ class LocalBacktest:
         self.sel_db = get_db()
         self.db = get_market_db()
         self.raw_conn = sqlite3.connect(self.db.db_path)
-        self._dates_cache: Optional[list[str]] = None
-        self._day_data_cache: dict[str, pd.DataFrame] = {}  # 缓存最近读取的日期数据
+        self._dates_cache: Optional[list[str]] = None  # 缓存最近读取的日期数据
 
     def get_available_dates(self) -> list[str]:
-        """获取 DB 中所有可用日截面日期（带缓存）。"""
+        """获取所有可用交易日（后复权CSV + parquet 合并）。"""
         if self._dates_cache is not None:
             return self._dates_cache
         c = self.raw_conn
-        rows = c.execute(
-            "SELECT DISTINCT cache_key FROM market_data_cache WHERE data_type='daily_snapshot' ORDER BY cache_key"
-        ).fetchall()
-        self._dates_cache = [r[0].replace("daily_snapshot_", "") for r in rows]
+        rows = c.execute("SELECT DISTINCT date FROM daily_price ORDER BY date").fetchall()
+        self._dates_cache = [r[0] for r in rows if r[0]]
         logger.info(f"可用日期: {len(self._dates_cache)} 天 ({self._dates_cache[0]} ~ {self._dates_cache[-1]})")
         return self._dates_cache
 
     def load_day_data(self, date_str: str) -> pd.DataFrame:
-        """从 SQLite 加载某日全量截面数据（带内存缓存）。"""
-        if date_str in self._day_data_cache:
-            return self._day_data_cache[date_str]
-        cache_key = f"daily_snapshot_{date_str}"
-        df = self.db.cache_get(cache_key)
-        if df is not None and len(df) > 0:
-            # 只缓存最近 40 天的数据（用于 T+N 验证）
-            if len(self._day_data_cache) < 40:
-                self._day_data_cache[date_str] = df
-        return df if df is not None else pd.DataFrame()
+        """加载截面：parquet价格 + 后复权基本面合并（无缓存）。"""
+        # 从 daily_price 读价格
+        c = self.raw_conn
+        rows = c.execute(
+            "SELECT code, close, pct_chg, vol, amount FROM daily_price WHERE date=?",
+            (date_str,)
+        ).fetchall()
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=["code_raw", "close", "pct_chg", "vol", "amount"])
+        # 清理后缀用于匹配基本面
+        df["code"] = df["code_raw"].str.replace(r"\.(SZ|SH|BJ)$", "", regex=True)
+        df["sector"] = "其他"
+        df["name"] = df["code"]
+
+        # 合并基本面
+        try:
+            fund_df = self.db.cache_get(f"daily_snapshot_{date_str}")
+            if fund_df is not None and len(fund_df) > 0:
+                fund_df["code"] = fund_df["code"].astype(str).str.zfill(6)
+                for col in ["name", "sector", "pe", "pb", "market_cap",
+                            "turnover", "amplitude",
+                            "chg_3d", "chg_6d", "chg_10d", "chg_25d", "change_pct"]:
+                    if col in fund_df.columns:
+                        fund_map = fund_df.set_index("code")[col].to_dict()
+                        df[col] = df["code"].map(fund_map)
+        except Exception as e:
+            pass
+
+        return df
 
     def filter_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """L2 过滤（委托 factor_engine）。"""
-        return filter_candidates(df)
+        """L2 过滤：有基本面 → factor_engine，纯价格 → 简化过滤。"""
+        has_fundamentals = "pe" in df.columns and df["pe"].notna().sum() > 100
+        if has_fundamentals:
+            return filter_candidates(df)
+        # 纯价格过滤：排除价格异常
+        c = df.copy()
+        if "close" in c.columns:
+            c = c[c["close"] > 0]
+        if "pct_chg" in c.columns:
+            c = c[c["pct_chg"] < 20]  # 排除涨停
+        return c
 
     def score_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """多因子评分（委托 factor_engine）。"""
-        return score_stocks(df)
+        """评分：有基本面→factor_engine，纯价格→动量因子。"""
+        has_fundamentals = "market_cap" in df.columns and df["market_cap"].notna().sum() > 100
+        if has_fundamentals:
+            return score_stocks(df)
+        # 纯动量评分
+        s = df.copy()
+        if "pct_chg" in s.columns:
+            s["composite_score"] = s["pct_chg"].fillna(0)
+        else:
+            s["composite_score"] = 0
+        return s.sort_values("composite_score", ascending=False)
 
     def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
         """按板块分组选 Top N（委托 factor_engine）。"""
@@ -115,35 +151,18 @@ class LocalBacktest:
         return filtered
 
     def get_price_on_date(self, code: str, date_str: str) -> Optional[float]:
-        """快速查询单只股票在某日的收盘价（直查 SQLite JSON）。"""
+        """查询股票收盘价（自动补后缀）。"""
         c = self.raw_conn
-        row = c.execute(
-            "SELECT data_json FROM market_data_cache WHERE cache_key=?",
-            (f"daily_snapshot_{date_str}",)
-        ).fetchone()
-        if row is None:
-            return None
-        # JSON 中搜索该 code 的 close 价（避免加载全量 DataFrame）
-        import re
-        pattern = f'"code":"{code}"'
-        data = row[0]
-        idx = data.find(pattern)
-        if idx < 0:
-            return None
-        # 从匹配位置往后找 "close": <number>
-        close_idx = data.find('"close":', idx)
-        if close_idx < 0:
-            return None
-        end = data.find(',', close_idx)
-        if end < 0:
-            end = data.find('}', close_idx)
-        if end < 0:
-            return None
-        val_str = data[close_idx+8:end]
-        try:
-            return float(val_str)
-        except ValueError:
-            return None
+        # 尝试无后缀、.SZ、.SH、.BJ
+        for suffix in ["", ".SZ", ".SH", ".BJ"]:
+            lookup = code + suffix
+            row = c.execute(
+                "SELECT close FROM daily_price WHERE code=? AND date=?",
+                (lookup, date_str)
+            ).fetchone()
+            if row:
+                return row[0]
+        return None
 
     def verify_performance(self, picks: list[dict], entry_date: str, periods: list[int] = None) -> list[dict]:
         """T+N 收益验证（直查 SQL，不加载全天数据）。"""
@@ -197,7 +216,7 @@ class LocalBacktest:
 
         for di, date_str in enumerate(all_dates):
             # CPU 安全
-            if (di + 1) % 10 == 0:
+            if (di + 1) % 50 == 0:
                 logger.info(f"  进度: {di+1}/{len(all_dates)}")
                 time.sleep(BATCH_SLEEP_SEC)
 
