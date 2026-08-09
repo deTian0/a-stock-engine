@@ -36,11 +36,13 @@ MAX_PER_SECTOR = 5
 RISK_STOP_LOSS_PCT = 8.0       # T+1 止损线 (%)
 RISK_MAX_SECTOR_PCT = 20.0     # 单板块最大占比 (%)
 RISK_MAX_STOCK_PCT = 5.0
-T_PERIODS = [1, 3, 5]        # T+N 验证周期
-MARKET_MA = 60                # 择时均线，低于此线空仓
-INITIAL_CAPITAL = 50000        # 初始资金（元）
-MAX_PICKS_PER_DAY = 20         # 每日最多持仓数
-HOLD_DAYS = 5                  # 持仓天数       # 单只股票最大占比 (%)
+T_PERIODS = [1, 3, 5]
+MARKET_MA = 60
+INITIAL_CAPITAL = 50000
+MAX_PICKS_PER_DAY = 20
+TRADE_COST = 0.002           # 0.2% 交易成本 (佣金+滑点)
+STOP_LOSS = 5.0              # 止损 (%)
+TARGET_BASE = 3.0            # 基础目标收益 (%)       # 单只股票最大占比 (%)
 
 
 class LocalBacktest:
@@ -368,134 +370,177 @@ class LocalBacktest:
 
 
     def run_portfolio(self) -> dict:
-        """资金模拟：5万起步，每日等权买入 Top N，持5天卖出。"""
+        """资金模拟：5万起，每只有目标/止损，动态持仓周期。"""
         all_dates = self.get_available_dates()
-        # Pre-compute market regime
         c = self.raw_conn
+
+        # 市场择时
         market_avg = {}
         for d in all_dates:
             r = c.execute("SELECT AVG(close) FROM daily_price WHERE date=?", (d,)).fetchone()
             market_avg[d] = r[0] or 0
         avg_vals = [market_avg[d] for d in all_dates]
-        ma60 = [sum(avg_vals[max(0,i-MARKET_MA+1):i+1]) / min(i+1,MARKET_MA) for i in range(len(all_dates))]
+        ma60 = [sum(avg_vals[max(0,i-MARKET_MA+1):i+1])/min(i+1,MARKET_MA) for i in range(len(all_dates))]
         regime = {all_dates[i]: avg_vals[i] > ma60[i] for i in range(len(all_dates))}
 
         cash = float(INITIAL_CAPITAL)
-        positions = {}  # {code: (buy_price, shares, sell_date_str)}
-        portfolio = []  # [(date_str, total_value)], daily history
+        positions = {}  # {code: {buy_price, shares, target, stop, hold_days, entry_idx, score}}
+        portfolio = []
+        sell_log = []   # 记录每笔卖出: (code, buy_p, sell_p, held, ret%, reason)
 
-        logger.info(f"资金模拟: 初始{cash:,.0f}元, 日选{MAX_PICKS_PER_DAY}只, 持有{HOLD_DAYS}天")
+        logger.info(f"资金模拟: 初始{cash:,.0f}元, 日选{MAX_PICKS_PER_DAY}只")
+        logger.info(f"规则: 目标+{TARGET_BASE}~8%, 止损-{STOP_LOSS}%, 成本{TRADE_COST*100:.1f}%")
 
         for di, date_str in enumerate(all_dates):
             if (di + 1) % 200 == 0:
-                logger.info(f"  进度: {di+1}/{len(all_dates)}")
+                logger.info(f"  进度: {di+1}/{len(all_dates)} | 持仓{len(positions)} | 现金{cash:,.0f}")
 
-            # 1. 卖出到期持仓
-            to_remove = []
-            for code, (bp, shares, sell_date) in positions.items():
-                if date_str >= sell_date:
-                    sell_price = self.get_price_on_date(code, date_str) or bp
-                    cash += shares * sell_price
-                    to_remove.append(code)
-            for code in to_remove:
+            # === 每日持仓评估 ===
+            to_sell = []
+            for code, pos in list(positions.items()):
+                cur_price = self.get_price_on_date(code, date_str)
+                if cur_price is None:
+                    cur_price = pos["buy_price"]
+                held_days = di - pos["entry_idx"]
+                ret_pct = (cur_price / pos["buy_price"] - 1) * 100
+                reason = None
+
+                # 1. 触碰止损
+                if ret_pct <= -STOP_LOSS:
+                    reason = f"止损({ret_pct:+.1f}%)"
+                # 2. 达到目标
+                elif cur_price >= pos["target"]:
+                    reason = f"达到目标({ret_pct:+.1f}%)"
+                # 3. 持仓到期
+                elif held_days >= pos["hold_days"]:
+                    reason = f"持仓到期({held_days}天)"
+                # 4. 动量衰减（跌破买入价且持有>3天）
+                elif held_days > 3 and cur_price < pos["buy_price"]:
+                    reason = f"动量衰减({ret_pct:+.1f}%)"
+
+                if reason:
+                    cash += pos["shares"] * cur_price * (1 - TRADE_COST)  # 卖出扣成本
+                    sell_log.append({
+                        "code": code, "buy_p": pos["buy_price"], "sell_p": cur_price,
+                        "held": held_days, "ret": round(ret_pct, 2), "reason": reason
+                    })
+                    to_sell.append(code)
+
+            for code in to_sell:
                 del positions[code]
 
-            # 2. 计算当前总资产
-            total_val = cash
-            for code, (bp, shares, _) in positions.items():
-                cur_p = self.get_price_on_date(code, date_str) or bp
-                total_val += shares * cur_p
-            portfolio.append((date_str, round(total_val, 2)))
+            # === 计算总资产 ===
+            total = cash
+            for pos in positions.values():
+                cp = self.get_price_on_date(pos["code"], date_str) or pos["buy_price"]
+                total += pos["shares"] * cp
+            portfolio.append((date_str, round(total, 2)))
 
-            # 3. 择时：市场不行 → 不买
+            # === 入场判断 ===
             if not regime.get(date_str, True):
                 continue
+            if cash < 5000:  # 资金太少不买
+                continue
 
-            # 4. 选股买入
             df = self.load_day_data(date_str)
             if len(df) == 0:
                 continue
             df = self.filter_stocks(df)
             df = self.score_stocks(df)
-            # 全市场 Top N（不按板块，资金有限）
-            top = df.head(MAX_PICKS_PER_DAY * 2)  # 多取一些，过滤已有持仓
+
+            # Top N, 排除已有持仓
+            top = df[~df["code"].isin(set(positions.keys()))].head(MAX_PICKS_PER_DAY * 3)
+            if len(top) == 0:
+                continue
 
             buy_count = 0
+            scores = top["composite_score"].values
+            s_median = float(np.median(scores[scores == scores])) if len(scores) > 0 else 0
+            s_max = float(np.max(scores)) if len(scores) > 0 else 1
+            s_range = max(s_max - s_median, 0.01)
+
             for _, row in top.iterrows():
                 code = row["code"]
-                if code in positions:
-                    continue  # 已有持仓，跳过
                 price = float(row["close"]) if pd.notna(row.get("close")) else 0
                 if price <= 0:
                     continue
-                alloc = cash / (MAX_PICKS_PER_DAY - buy_count) if (MAX_PICKS_PER_DAY - buy_count) > 0 else 0
-                shares = int(alloc / price / 100) * 100  # A股100股整数倍
+
+                alloc = cash / max(MAX_PICKS_PER_DAY - buy_count, 1)
+                shares = int(alloc / price / 100) * 100
                 if shares < 100:
                     continue
-                cost = shares * price
+
+                cost = shares * price * (1 + TRADE_COST)  # 买入扣成本
                 if cost > cash * 0.5:
-                    continue  # 单只不超过50%仓位
+                    continue
+
+                # 动态持仓天数：分高→多拿，分低→早走
+                s = float(row["composite_score"])
+                percentile = min(1.0, max(0.1, (s - s_median) / s_range + 0.5))
+                hold_days = max(3, min(10, int(5 + percentile * 5)))  # 3-10天
+
+                # 目标价：分越高目标越高
+                target_pct = TARGET_BASE + percentile * 5  # 3%-8%
+                target_price = price * (1 + target_pct / 100)
+                stop_price = price * (1 - STOP_LOSS / 100)
 
                 cash -= cost
-                sell_date_idx = di + HOLD_DAYS
-                sell_date = all_dates[sell_date_idx] if sell_date_idx < len(all_dates) else all_dates[-1]
-                positions[code] = (price, shares, sell_date)
+                positions[code] = {
+                    "code": code, "buy_price": price, "shares": shares,
+                    "target": round(target_price, 2), "stop": round(stop_price, 2),
+                    "hold_days": hold_days, "entry_idx": di, "score": round(s, 2)
+                }
                 buy_count += 1
                 if buy_count >= MAX_PICKS_PER_DAY:
                     break
 
         # 清仓
         last_date = all_dates[-1]
-        for code, (bp, shares, _) in list(positions.items()):
-            sp = self.get_price_on_date(code, last_date) or bp
-            cash += shares * sp
-        total_val = cash
-        portfolio.append((last_date, round(total_val, 2)))
+        for code, pos in list(positions.items()):
+            sp = self.get_price_on_date(code, last_date) or pos["buy_price"]
+            cash += pos["shares"] * sp * (1 - TRADE_COST)
+        total = cash
+        portfolio.append((last_date, round(total, 2)))
 
-        # 统计
+        # === 统计 ===
         values = [v for _, v in portfolio]
-        returns = [(values[i] / values[i-1] - 1) for i in range(1, len(values)) if values[i-1] > 0]
-
-        # CAGR
+        returns_daily = [(values[i]/values[i-1]-1) for i in range(1,len(values)) if values[i-1]>0]
         years = len(values) / 252
-        cagr = (values[-1] / INITIAL_CAPITAL) ** (1 / years) - 1 if years > 0 and values[-1] > 0 else 0
+        cagr = (values[-1]/INITIAL_CAPITAL)**(1/years)-1 if years>0 else 0
 
-        # Max drawdown
-        peak = values[0]
-        max_dd = 0.0
+        peak = values[0]; max_dd = 0.0
         for v in values:
-            if v > peak:
-                peak = v
-            dd = (peak - v) / peak if peak > 0 else 0
-            if dd > max_dd:
-                max_dd = dd
+            if v > peak: peak = v
+            dd = (peak-v)/peak if peak>0 else 0
+            if dd > max_dd: max_dd = dd
 
-        # Sharpe (risk-free = 2%)
-        ret_arr = np.array(returns) if returns else np.array([0])
-        rf_daily = 0.02 / 252
+        ret_arr = np.array(returns_daily) if returns_daily else np.array([0])
+        rf_daily = 0.02/252
         excess = ret_arr - rf_daily
-        sharpe = float(np.mean(excess) / np.std(excess) * np.sqrt(252)) if np.std(excess) > 0 else 0
+        sharpe = float(np.mean(excess)/np.std(excess)*np.sqrt(252)) if np.std(excess)>0 else 0
 
-        # Annual return by year
+        # 卖出原因统计
+        reasons = {}
+        for sl in sell_log:
+            r = sl["reason"].split("(")[0]
+            reasons[r] = reasons.get(r, 0) + 1
+        avg_held = np.mean([sl["held"] for sl in sell_log]) if sell_log else 0
+        avg_ret = np.mean([sl["ret"] for sl in sell_log]) if sell_log else 0
+
+        # 逐年
         yearly = {}
         for d, v in portfolio:
-            y = d[:4]
-            yearly.setdefault(y, []).append(v)
-        year_returns = {}
-        for y, vals in yearly.items():
-            if vals[0] > 0:
-                year_returns[y] = round((vals[-1] / vals[0] - 1) * 100, 1)
+            y = d[:4]; yearly.setdefault(y, []).append(v)
+        year_returns = {y: round((vals[-1]/vals[0]-1)*100,1) for y,vals in yearly.items() if vals[0]>0}
 
         return {
-            "initial": INITIAL_CAPITAL,
-            "final": round(values[-1], 2),
-            "return_pct": round((values[-1] / INITIAL_CAPITAL - 1) * 100, 2),
-            "cagr_pct": round(cagr * 100, 2),
-            "max_drawdown_pct": round(max_dd * 100, 2),
-            "sharpe": round(sharpe, 2),
-            "years": round(years, 1),
-            "year_returns": year_returns,
-            "portfolio": portfolio,
+            "initial": INITIAL_CAPITAL, "final": round(values[-1],2),
+            "return_pct": round((values[-1]/INITIAL_CAPITAL-1)*100,2),
+            "cagr_pct": round(cagr*100,2), "max_drawdown_pct": round(max_dd*100,2),
+            "sharpe": round(sharpe,2), "years": round(years,1),
+            "year_returns": year_returns, "portfolio": portfolio,
+            "sell_stats": {"reasons": reasons, "avg_held_days": round(avg_held,1),
+                           "avg_return": round(avg_ret,2), "total_trades": len(sell_log)},
         }
 
 
@@ -529,6 +574,14 @@ def main():
             print(f"\n逐年收益:")
             for y, r in sorted(pf["year_returns"].items()):
                 print(f"  {y}: {r:+.1f}%")
+
+        # 卖出统计
+        sell_stats = pf.get("sell_stats", {})
+        if sell_stats:
+            print(f"\n卖出统计 ({sell_stats['total_trades']}笔):")
+            print(f"  平均持有: {sell_stats['avg_held_days']}天 | 平均收益: {sell_stats['avg_return']:+.2f}%")
+            for reason, cnt in sell_stats.get("reasons", {}).items():
+                print(f"  {reason}: {cnt}笔")
 
         # 保存资产曲线
         portfolio = pf.get("portfolio", [])
