@@ -202,6 +202,7 @@ class LocalBacktest:
     def run(self, start_date: str = None, end_date: str = None) -> dict:
         """运行回测（纯计算，不写DB）。"""
         all_dates = self.get_available_dates()
+        keep_last = 60  # 只保留最后60天用于T+N验证，其余丢弃
 
         if start_date:
             all_dates = [d for d in all_dates if d >= start_date]
@@ -235,7 +236,11 @@ class LocalBacktest:
                 })
                 total_picks += len(picks)
 
-        logger.info(f"回测完成: {len(daily_records)} 个有效日, {total_picks} 次推荐")
+            # 只保留最近 keep_last 天，节省内存
+            if len(daily_records) > keep_last:
+                daily_records = daily_records[-keep_last:]
+
+        logger.info(f"回测完成: {len(daily_records)} 个有效日 (缓存{keep_last}天), {total_picks} 次推荐")
 
         # T+N 验证 (含止损模拟)
         verify_results = []
