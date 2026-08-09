@@ -554,19 +554,138 @@ class LocalBacktest:
         }
 
 
+def generate_html_report(pf: dict, config: dict) -> str:
+    """生成可视化 HTML 报告。"""
+    portfolio = pf.get("portfolio", [])
+    if not portfolio:
+        return ""
+
+    dates = [p[0][:10] for p in portfolio]
+    values = [p[1] for p in portfolio]
+    initial = pf["initial"]
+
+    # 计算回撤序列
+    peak = values[0]
+    drawdowns = []
+    for v in values:
+        if v > peak: peak = v
+        drawdowns.append(round((peak - v) / peak * 100, 2))
+
+    # 逐年收益
+    year_rows = "".join(
+        f"<tr><td>{y}</td><td style='color:{'red' if r>0 else 'green'}'>{r:+.1f}%</td></tr>"
+        for y, r in sorted(pf.get("year_returns", {}).items())
+    )
+
+    sell = pf.get("sell_stats", {})
+    reason_rows = "".join(
+        f"<tr><td>{k}</td><td>{v}</td><td>{v/sell['total_trades']*100:.0f}%</td></tr>"
+        for k, v in sell.get("reasons", {}).items()
+    ) if sell else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+<meta charset=\"UTF-8\">
+<title>A股多因子回测报告</title>
+<script src=\"https://cdn.jsdelivr.net/npm/chart.js@4\"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Microsoft YaHei',sans-serif;background:#0f172a;color:#e2e8f0;padding:20px}}
+.container{{max-width:1200px;margin:0 auto}}
+h1{{text-align:center;margin:20px 0;font-size:28px;color:#38bdf8}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}}
+.card{{background:#1e293b;border-radius:12px;padding:20px;text-align:center;border:1px solid #334155}}
+.card .label{{font-size:13px;color:#94a3b8;margin-bottom:8px}}
+.card .value{{font-size:28px;font-weight:700;font-family:monospace}}
+.red{{color:#ef4444}}.green{{color:#22c55e}}.blue{{color:#38bdf8}}
+.chart-container{{background:#1e293b;border-radius:12px;padding:20px;margin-bottom:20px;border:1px solid #334155}}
+.chart-container h3{{margin-bottom:16px;color:#94a3b8}}
+canvas{{max-height:350px}}
+table{{width:100%;border-collapse:collapse;margin-top:12px}}
+th,td{{padding:10px 16px;text-align:left;border-bottom:1px solid #334155}}
+th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
+.two-col{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}
+@media(max-width:768px){{.two-col{{grid-template-columns:1fr}}}}
+</style>
+</head>
+<body>
+<div class=\"container\">
+<h1>A股多因子选股系统 — 回测报告</h1>
+<p style=\"text-align:center;color:#64748b;margin-bottom:24px\">
+  区间: {dates[0]} ~ {dates[-1]} | {pf['years']}年 | 
+  佣金: 万0.854免5 (股票{config.get('trade',{}).get('stock_cost',0.0013)*100:.2f}% / ETF{config.get('trade',{}).get('etf_cost',0.00017)*100:.3f}%)
+</p>
+
+<div class=\"cards\">
+  <div class=\"card\"><div class=\"label\">初始资金</div><div class=\"value blue\">¥{initial:,.0f}</div></div>
+  <div class=\"card\"><div class=\"label\">最终资金</div><div class=\"value {'red' if pf['return_pct']>0 else 'green'}\">¥{pf['final']:,.0f}</div></div>
+  <div class=\"card\"><div class=\"label\">总收益</div><div class=\"value {'red' if pf['return_pct']>0 else 'green'}\">{pf['return_pct']:+.1f}%</div></div>
+  <div class=\"card\"><div class=\"label\">年化收益</div><div class=\"value {'red' if pf['cagr_pct']>0 else 'green'}\">{pf['cagr_pct']:+.1f}%</div></div>
+  <div class=\"card\"><div class=\"label\">最大回撤</div><div class=\"value green\">-{pf['max_drawdown_pct']:.1f}%</div></div>
+  <div class=\"card\"><div class=\"label\">夏普比率</div><div class=\"value blue\">{pf['sharpe']}</div></div>
+</div>
+
+<div class=\"chart-container\"><h3>资产曲线</h3><canvas id=\"equityChart\"></canvas></div>
+
+<div class=\"two-col\">
+  <div class=\"chart-container\"><h3>回撤曲线</h3><canvas id=\"ddChart\"></canvas></div>
+  <div class=\"chart-container\"><h3>逐年收益</h3><table>{year_rows}</table></div>
+</div>
+
+<div class=\"chart-container\"><h3>卖出原因分布</h3><table>
+<tr><th>原因</th><th>笔数</th><th>占比</th></tr>{reason_rows}
+<tr style=\"font-weight:700\"><td>合计</td><td>{sell['total_trades']}</td><td>平均持有{sell.get('avg_held_days',0)}天 / 均益{sell.get('avg_return',0):+.2f}%</td></tr>
+</table></div>
+
+</div>
+<script>
+const dates = {dates};
+const values = {values};
+const dd = {drawdowns};
+new Chart(document.getElementById('equityChart'),{{
+  type:'line',data:{{labels:dates,datasets:[{{label:'资产(¥)',data:values,borderColor:'#38bdf8',borderWidth:2,pointRadius:0,fill:false,tension:0.1}}]}},
+  options:{{responsive:true,scales:{{x:{{ticks:{{color:'#94a3b8',maxTicksLimit:12}}}},y:{{ticks:{{color:'#94a3b8',callback:v=>'¥'+(v/10000).toFixed(0)+'万'}}}}}},plugins:{{legend:{{display:false}}}}}}
+}});
+new Chart(document.getElementById('ddChart'),{{
+  type:'area',data:{{labels:dates,datasets:[{{label:'回撤(%)',data:dd,borderColor:'#ef4444',backgroundColor:'rgba(239,68,68,0.15)',borderWidth:2,pointRadius:0,fill:true,tension:0.1}}]}},
+  options:{{responsive:true,scales:{{x:{{ticks:{{color:'#94a3b8',maxTicksLimit:12}}}},y:{{reverse:true,ticks:{{color:'#94a3b8',callback:v=>v+'%'}}}}}},plugins:{{legend:{{display:false}}}}}}
+}});
+</script>
+</body></html>"""
+
+    html_path = Path("briefs") / f"回测报告_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html, encoding="utf-8")
+    return str(html_path)
+
+
 def main():
-    
+    # 加载配置
+    import yaml
+    config = {}
+    config_path = Path(__file__).parent / "config.yaml"
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as fh:
+            config = yaml.safe_load(fh) or {}
+
+    def cfg(section, key, default):
+        return config.get(section, {}).get(key, default)
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.info("=" * 60)
     logger.info("本地数据回测启动")
     logger.info("=" * 60)
 
     bt = LocalBacktest()
+    bt.config = config  # 注入配置
 
     try:
         # === 资金模拟 ===
+        cap = cfg("portfolio", "initial_capital", INITIAL_CAPITAL)
+        mpd = cfg("portfolio", "max_picks_per_day", MAX_PICKS_PER_DAY)
         logger.info("\n" + "=" * 60)
-        logger.info(f"资金模拟: 初始 {INITIAL_CAPITAL:,} 元, 日选 {MAX_PICKS_PER_DAY} 只, 动态持仓 3-10天")
+        logger.info(f"资金模拟: 初始 {cap:,} 元, 日选 {mpd} 只, 动态持仓 3-10天")
         logger.info("=" * 60)
         pf = bt.run_portfolio()
 
@@ -600,6 +719,11 @@ def main():
             csv_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(portfolio, columns=["date", "value"]).to_csv(csv_path, index=False)
             print(f"\n资产曲线: {csv_path}")
+
+        # 生成 HTML 报告
+        if cfg("output", "save_html", True):
+            html_path = generate_html_report(pf, config)
+            print(f"可视化: {html_path}")
 
     except KeyboardInterrupt:
         logger.warning("用户中断")

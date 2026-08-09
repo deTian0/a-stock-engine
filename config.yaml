@@ -1,0 +1,34 @@
+# A股多因子选股系统 — 回测配置
+# 修改参数后直接运行: python local_backtest.py
+
+portfolio:
+  initial_capital: 50000        # 初始资金（元）
+  max_picks_per_day: 20         # 每日最多持仓
+  min_cash_to_trade: 5000       # 现金低于此数不买入
+
+risk:
+  stop_loss: 5.0                # 止损线 (%)
+  target_base: 3.0              # 基础目标收益 (%)
+  target_max: 8.0               # 最高目标收益 (%)
+  max_single_position: 0.5      # 单只最大仓位 (50%)
+
+timing:
+  market_ma: 60                 # 择时均线天数
+  enabled: true                 # 是否启用择时
+
+trade:
+  stock_cost: 0.0013            # 股票交易成本 (万0.854+印花税)
+  etf_cost: 0.00017             # ETF交易成本 (免印花税)
+
+holding:
+  min_days: 3                   # 最短持仓
+  max_days: 10                  # 最长持仓
+  momentum_decay_days: 3        # 跌破买入价N天后认定为动量衰减
+
+universe:
+  min_list_days: 252            # 最少上市天数（排除新股）
+  exclude_st: true              # 排除ST/退市
+
+output:
+  save_csv: true                # 保存资产曲线CSV
+  save_html: true               # 生成可视化HTML报告
