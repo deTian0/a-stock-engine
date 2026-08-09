@@ -23,6 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from database import get_db
+from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -66,103 +67,20 @@ class LocalBacktest:
         return df if df is not None else pd.DataFrame()
 
     def filter_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """L2 过滤（纯向量化，单次计算）。"""
-        if len(df) == 0:
-            return df
-        c = df.copy()
-        # ST
-        if "name" in c.columns:
-            c = c[~c["name"].str.contains(r"ST|\*ST", na=False, regex=True)]
-        # 退市
-        if "name" in c.columns:
-            c = c[~c["name"].str.contains("退", na=False)]
-        # 市值
-        if "market_cap" in c.columns:
-            c = c[c["market_cap"] >= 20e8]
-        # PE
-        if "pe" in c.columns:
-            c = c[(c["pe"] > 0) & (c["pe"] <= 300)]
-        # 价格
-        if "close" in c.columns:
-            c = c[c["close"] > 0]
-        return c
+        """L2 过滤（委托 factor_engine）。"""
+        return filter_candidates(df)
 
     def score_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """多因子评分 v2 — Z-Score行业中性化 + 小市值/波动率 + 动态权重。"""
-        if len(df) == 0:
-            return df
-        s = df.copy()
-        s["sector"] = s["sector"].fillna("其他")
+        """多因子评分（委托 factor_engine）。"""
+        return score_stocks(df)
 
-        # ===== Factor 1: 动量 (20日涨幅) =====
-        if "change_pct" in s.columns:
-            s["f_momentum"] = self._zscore_within_group(s, "change_pct", direction=1)
-
-        # ===== Factor 2: 中期动量 (25日涨幅) =====
-        if "chg_25d" in s.columns:
-            s["f_momentum_25d"] = self._zscore_within_group(s, "chg_25d", direction=1)
-
-        # ===== Factor 3: PE 价值 =====
-        if "pe" in s.columns:
-            pe_clipped = s["pe"].clip(0, 300).where(s["pe"] > 0, np.nan)
-            s["f_pe"] = self._zscore_within_group(s.assign(_val=pe_clipped), "_val", direction=-1)
-
-        # ===== Factor 4: PB 价值 =====
-        if "pb" in s.columns:
-            pb_clipped = s["pb"].clip(0, 50).where(s["pb"] > 0, np.nan)
-            s["f_pb"] = self._zscore_within_group(s.assign(_val=pb_clipped), "_val", direction=-1)
-
-        # ===== Factor 5: 小市值 (v2 新增) =====
-        if "market_cap" in s.columns:
-            s["f_small_cap"] = self._zscore_within_group(s, "market_cap", direction=-1)
-
-        # ===== Factor 6: 低波动 (v2 新增 — 振幅/换手率综合) =====
-        vol_cols = []
-        if "amplitude" in s.columns:
-            vol_cols.append("amplitude")
-        if "turnover" in s.columns:
-            vol_cols.append("turnover")
-        if vol_cols:
-            s["_vol_proxy"] = s[vol_cols].mean(axis=1, skipna=True)
-            s["f_low_vol"] = self._zscore_within_group(s, "_vol_proxy", direction=-1)
-
-        # ===== Factor 7: 质量 (3/6/10日动量持续性) =====
-        mom_cols = [c for c in ["chg_3d", "chg_6d", "chg_10d"] if c in s.columns]
-        if mom_cols:
-            s["_mom_avg"] = s[mom_cols].mean(axis=1, skipna=True)
-            s["f_momentum_multi"] = self._zscore_within_group(s, "_mom_avg", direction=1)
-
-        # ===== 综合评分 (IR加权) =====
-        factor_cols = [c for c in s.columns if c.startswith("f_")]
-        if not factor_cols:
-            s["composite_score"] = 0
-            return s
-
-        # 动态权重：基于近期IC (简化：等权重作为默认)
-        weights = {
-            "f_momentum": 0.15, "f_momentum_25d": 0.10,
-            "f_pe": 0.15, "f_pb": 0.10,
-            "f_small_cap": 0.20, "f_low_vol": 0.10,
-            "f_momentum_multi": 0.10,
-        }
-
-        s["raw_score"] = 0.0
-        for col in factor_cols:
-            w = weights.get(col, 1.0 / len(factor_cols))
-            s["raw_score"] += s[col].fillna(0) * w
-
-        # 行业中性化：减去行业内均值，消除行业偏倚
-        s["composite_score"] = s["raw_score"] - s.groupby("sector")["raw_score"].transform("mean")
-
-        return s.sort_values("composite_score", ascending=False)
+    def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
+        """按板块分组选 Top N（委托 factor_engine）。"""
+        return pick_top_by_sector(df, max_per)
 
     @staticmethod
-    def _zscore_within_group(df: pd.DataFrame, col: str, direction: int = 1) -> pd.Series:
-        """行业分组 Z-Score 标准化 + 方向调整。"""
-        group_means = df.groupby("sector")[col].transform("mean")
-        group_stds = df.groupby("sector")[col].transform("std").clip(lower=0.001)
-        z = ((df[col].fillna(group_means) - group_means) / group_stds).fillna(0)
-        return z.clip(-3, 3) * direction
+    def _zscore_within_group(df, col, direction=1):
+        return pd.Series(0, index=df.index)  # no longer used, kept for compat
 
     def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
         """按板块分组选 Top N。"""

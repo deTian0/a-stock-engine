@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from westock_cli import get_cli
 from database import get_db
 from guard import setup_protection, teardown_protection, setup_logging
+from factor_engine import score_stocks as factor_score, pick_top_by_sector, filter_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -146,95 +147,16 @@ class RotationTracker:
             return pd.DataFrame()
 
     def filter_and_clean(self, df: pd.DataFrame) -> pd.DataFrame:
-        """L2 风格过滤：排除 ST、小市值、异常价格。"""
-        if len(df) == 0:
-            return df
-
-        candidates = df.copy()
-
-        # 排除 ST
-        if "name" in candidates.columns:
-            candidates = candidates[
-                ~candidates["name"].str.contains(r"ST|\*ST", na=False, regex=True)
-            ]
-
-        # 排除退市
-        if "name" in candidates.columns:
-            candidates = candidates[
-                ~candidates["name"].str.contains(r"退", na=False)
-            ]
-
-        # 市值过滤
-        if "market_cap" in candidates.columns:
-            candidates = candidates[candidates["market_cap"] >= 20e8]
-
-        # 排除价格为 0 的
-        if "close" in candidates.columns:
-            candidates = candidates[candidates["close"] > 0]
-
-        logger.info(f"过滤后: {len(candidates)} 只 (原 {len(df)} 只)")
-        return candidates
+        """L2 过滤（委托 factor_engine）。"""
+        return filter_candidates(df)
 
     def score_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """简化多因子评分（CPU 安全：纯向量化运算，无并发）。"""
-        if len(df) == 0:
-            return df
-
-        scored = df.copy()
-        scored["composite_score"] = 0.0
-
-        # 动量得分
-        for col, weight in [("change_pct", 0.2), ("change_60d", 0.15)]:
-            if col in scored.columns:
-                rank = scored[col].fillna(0).rank(pct=True) * 100
-                scored["composite_score"] += rank * weight * 0.01
-
-        # 价值得分（PE 越低越好）
-        if "pe" in scored.columns:
-            pe_valid = scored["pe"].copy()
-            pe_valid = pe_valid[pe_valid > 0].fillna(scored["pe"].median())
-            rank = 100 - (pe_valid.rank(pct=True) * 100)
-            scored["composite_score"] += rank * 0.15 * 0.01
-
-        # 成交额得分
-        if "amount" in scored.columns:
-            rank = scored["amount"].fillna(0).rank(pct=True) * 100
-            scored["composite_score"] += rank * 0.1 * 0.01
-
-        # 换手率得分
-        if "turnover" in scored.columns:
-            rank = scored["turnover"].fillna(0).rank(pct=True) * 100
-            scored["composite_score"] += rank * 0.1 * 0.01
-
-        scored = scored.sort_values("composite_score", ascending=False)
-        return scored
+        """多因子评分（委托 factor_engine）。"""
+        return factor_score(df)
 
     def pick_by_sector(self, df: pd.DataFrame, max_per_sector: int = 5) -> list[dict]:
-        """按板块分组，每个板块选 Top N。"""
-        if len(df) == 0 or "sector" not in df.columns:
-            return []
-
-        picks = []
-        sectors_seen = set()
-
-        for sector_name, group in df.groupby("sector"):
-            if sector_name in sectors_seen:
-                continue
-            sectors_seen.add(sector_name)
-
-            top = group.head(max_per_sector)
-            for rank, (_, row) in enumerate(top.iterrows(), 1):
-                picks.append({
-                    "sector": str(sector_name),
-                    "code": str(row.get("code", "")),
-                    "name": str(row.get("name", "")),
-                    "asset_type": str(row.get("asset_type", "stock")),
-                    "score": round(float(row.get("composite_score", 0)), 2),
-                    "close_price": float(row.get("close", 0)),
-                    "rank": rank,
-                })
-
-        return picks
+        """按板块分组选 Top N（委托 factor_engine）。"""
+        return pick_top_by_sector(df, max_per_sector)
 
     def run(self) -> dict:
         """主流程：获取数据 → 过滤 → 评分 → 按板块选股 → 入库。"""

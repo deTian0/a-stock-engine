@@ -197,6 +197,24 @@ class StockDB:
         CREATE INDEX IF NOT EXISTS idx_rot_sector   ON sector_rotation_tracking(sector_name, session_type);
         CREATE INDEX IF NOT EXISTS idx_rot_code     ON sector_rotation_tracking(code);
 
+        -- 归一化价格表（v3 新增）：code+date 复合主键
+        CREATE TABLE IF NOT EXISTS daily_price (
+            code          TEXT    NOT NULL,
+            date          TEXT    NOT NULL,
+            open          REAL,
+            high          REAL,
+            low           REAL,
+            close         REAL,
+            pre_close     REAL,
+            change        REAL,
+            pct_chg       REAL,
+            vol           REAL,
+            amount        REAL,
+            adj_factor    REAL,
+            PRIMARY KEY (code, date)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_dp_date ON daily_price(date);
+
         -- 累计命中次数（v3 新增）：追踪每只股票被选中的历史
         CREATE TABLE IF NOT EXISTS pick_frequency (
             code          TEXT    NOT NULL,
@@ -794,6 +812,31 @@ class StockDB:
             ORDER BY cnt DESC
         """, (window_start,)).fetchall()
         return {r["sector_name"]: r["cnt"] for r in rows}
+
+    def bulk_insert_prices(self, rows: list[tuple]) -> int:
+        """批量写入归一化价格数据（v3新增）。"""
+        if not rows:
+            return 0
+        c = self.conn
+        c.executemany("""
+            INSERT OR REPLACE INTO daily_price
+            (code, date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, rows)
+        c.commit()
+        return len(rows)
+
+    def get_price_batch(self, codes: list[str], date_str: str) -> dict[str, float]:
+        """批量查询指定日期多只股票的收盘价（用于T+N验证）。"""
+        if not codes or not date_str:
+            return {}
+        c = self.conn
+        placeholders = ",".join("?" for _ in codes)
+        rows = c.execute(
+            f"SELECT code, close FROM daily_price WHERE date=? AND code IN ({placeholders})",
+            [date_str] + codes
+        ).fetchall()
+        return {r["code"]: r["close"] for r in rows}
 
 
 # ---- 全局单例 ----
