@@ -197,20 +197,14 @@ class StockDB:
         CREATE INDEX IF NOT EXISTS idx_rot_sector   ON sector_rotation_tracking(sector_name, session_type);
         CREATE INDEX IF NOT EXISTS idx_rot_code     ON sector_rotation_tracking(code);
 
-        -- 归一化价格表（v3 新增）：code+date 复合主键
+        -- 归一化价格表（v3 新增）：code+date 复合主键，只存回测必需列
         CREATE TABLE IF NOT EXISTS daily_price (
             code          TEXT    NOT NULL,
             date          TEXT    NOT NULL,
-            open          REAL,
-            high          REAL,
-            low           REAL,
             close         REAL,
-            pre_close     REAL,
-            change        REAL,
             pct_chg       REAL,
             vol           REAL,
             amount        REAL,
-            adj_factor    REAL,
             PRIMARY KEY (code, date)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_dp_date ON daily_price(date);
@@ -814,14 +808,14 @@ class StockDB:
         return {r["sector_name"]: r["cnt"] for r in rows}
 
     def bulk_insert_prices(self, rows: list[tuple]) -> int:
-        """批量写入归一化价格数据（v3新增）。"""
+        """批量写入归一化价格数据。rows: [(code, date, close, pct_chg, vol, amount), ...]"""
         if not rows:
             return 0
         c = self.conn
         c.executemany("""
             INSERT OR REPLACE INTO daily_price
-            (code, date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            (code, date, close, pct_chg, vol, amount)
+            VALUES (?,?,?,?,?,?)
         """, rows)
         c.commit()
         return len(rows)

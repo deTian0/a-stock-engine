@@ -162,27 +162,22 @@ def import_parquet_prices(db, base_dir: str):
 
     for fi, fpath in enumerate(files):
         try:
-            df = pd.read_parquet(str(fpath))
+            df = pd.read_parquet(str(fpath), columns=["code", "close", "pct_chg", "vol", "amount"])
             if len(df) == 0:
                 continue
 
-            # 标准化列名
-            col_map = {
-                "code": "code", "date": "date", "open": "open", "high": "high",
-                "low": "low", "close": "close", "pre_close": "pre_close",
-                "change": "change", "pct_chg": "pct_chg", "vol": "vol",
-                "amount": "amount", "adj_factor": "adj_factor",
-            }
-            rows = []
-            for _, row in df.iterrows():
-                r = tuple(
-                    float(row.get(c, 0)) if c not in ("code", "date") and pd.notna(row.get(c))
-                    else str(row.get(c, "")) if c in ("code", "date")
-                    else 0
-                    for c in col_map
-                )
-                # code → str, date → YYYY-MM-DD
-                rows.append((str(r[0]).zfill(6), str(r[1])[:10], *r[2:]))
+            df["code"] = df["code"].astype(str).str.zfill(6)
+            date_str = fpath.stem[:8]  # "20260105"
+            date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+            rows = [
+                (str(r.code), date_str,
+                 float(r.close) if pd.notna(r.close) else 0.0,
+                 float(r.pct_chg) if pd.notna(r.pct_chg) else 0.0,
+                 float(r.vol) if pd.notna(r.vol) else 0.0,
+                 float(r.amount) if pd.notna(r.amount) else 0.0)
+                for _, r in df.iterrows()
+            ]
 
             if rows:
                 db.bulk_insert_prices(rows)
