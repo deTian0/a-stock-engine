@@ -40,7 +40,7 @@ T_PERIODS = [1, 3, 5]
 MARKET_MA = 60
 INITIAL_CAPITAL = 50000
 MAX_PICKS_PER_DAY = 20
-TRADE_COST = 0.002           # 0.2% 交易成本 (佣金+滑点)
+TRADE_COST = 0.0013          # 0.13% 交易成本 (万0.854免5佣金+印花税)
 STOP_LOSS = 5.0              # 止损 (%)
 TARGET_BASE = 3.0            # 基础目标收益 (%)       # 单只股票最大占比 (%)
 
