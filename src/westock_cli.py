@@ -133,7 +133,7 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
 
 
 class WestockCLI:
-    """westock-data CLI 封装，失败时自动回退到 akshare。"""
+    """数据源封装，按 config.yaml data.source 选择数据源。"""
 
     def __init__(self, cache_dir: str = "data_cache", cache_expiry_hours: int = 12):
         self.cache_dir = Path(cache_dir)
@@ -141,7 +141,40 @@ class WestockCLI:
         self.cache_expiry_seconds = cache_expiry_hours * 3600
         self._timeout = 30
         self._max_retries = 3
-        self._akshare = None  # 懒加载
+        self._akshare = None
+        self._sina = None
+        self._config_source = self._load_config_source()
+
+    def _load_config_source(self) -> str:
+        try:
+            import yaml
+            config_path = Path(__file__).parent.parent / "config.yaml"
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                return cfg.get("data", {}).get("source", "sina")
+        except Exception:
+            pass
+        return "sina"
+
+    @property
+    def _primary(self):
+        """按配置选择主数据源。"""
+        src = self._config_source
+        if src == "sina":
+            if self._sina is None:
+                try:
+                    from sina_provider import get_sina
+                    self._sina = get_sina()
+                    logger.info("数据源: 新浪 API")
+                except ImportError:
+                    logger.warning("sina_provider 不可用，回退 akshare")
+                    return self._ak
+            return self._sina
+        elif src == "akshare":
+            return self._ak
+        # westock / default → sina
+        return self._ak  # 实际回退链在各方法中
 
     # ---- 缓存管理 ----
 
@@ -186,93 +219,59 @@ class WestockCLI:
     # ---- 数据接口 ----
 
     def get_stock_list(self) -> pd.DataFrame:
-        """获取全A股股票列表。优先 westock-data，失败回退 akshare。"""
-        cache_key = "stock_list"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
+        """获取全A股股票列表。"""
         try:
-            output = run_westock(["query", "--type", "stock_list", "--market", "A股"],
-                                 timeout=self._timeout, max_retries=1)
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
+            df = self._primary.get_stock_list()
+            if len(df) > 0:
+                return df
         except Exception as e:
-            logger.info(f"westock-data 股票列表失败: {e}，回退 akshare")
-            if self._ak:
-                return self._ak.get_stock_list()
-            raise
+            logger.debug(f"主数据源 stock_list 失败: {e}")
+        return pd.DataFrame()
 
     def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> pd.DataFrame:
-        """获取个股K线数据。优先 westock-data，失败回退 akshare。"""
-        cache_key = f"kline_{code}_{days}_{adjust}"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
+        """个股K线。"""
         try:
-            output = run_westock(
-                ["query", "--type", "kline", "--stock", code,
-                 "--days", str(days), "--adjust", adjust],
-                timeout=self._timeout, max_retries=1
-            )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
-        except Exception as e:
-            logger.debug(f"westock-data K线失败 {code}: {e}，回退 akshare")
+            return self._primary.get_kline(code, days, adjust)
+        except Exception:
             if self._ak:
                 return self._ak.get_kline(code, days, adjust)
             return pd.DataFrame()
 
     def get_index_kline(self, code: str, days: int = 60) -> pd.DataFrame:
-        """获取指数K线数据。优先 westock-data，失败回退 akshare。"""
-        cache_key = f"index_kline_{code}_{days}"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
+        """指数K线。"""
         try:
-            output = run_westock(
-                ["query", "--type", "kline", "--index", code, "--days", str(days)],
-                timeout=self._timeout, max_retries=1
-            )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
-        except Exception as e:
-            logger.debug(f"westock-data 指数K线失败 {code}: {e}，回退 akshare")
+            return self._primary.get_index_kline(code, days)
+        except Exception:
             if self._ak:
                 return self._ak.get_index_kline(code, days)
             return pd.DataFrame()
 
     def get_fundamentals(self, codes: list[str]) -> pd.DataFrame:
-        """获取基本面数据。优先 westock-data，失败回退 akshare。"""
-        import hashlib
-        cache_key = f"fundamentals_{hashlib.md5(','.join(sorted(codes)).encode()).hexdigest()[:12]}"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
+        """基本面数据。"""
         try:
-            output = run_westock(
-                ["query", "--type", "fundamentals", "--stocks", ",".join(codes)],
-                timeout=self._timeout, max_retries=1
-            )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
-        except Exception as e:
-            logger.info(f"westock-data 基本面失败: {e}，回退 akshare")
+            return self._primary.get_fundamentals(codes)
+        except Exception:
             if self._ak:
                 return self._ak.get_fundamentals(codes)
             return pd.DataFrame()
 
     def get_sector_mapping(self) -> dict[str, str]:
-        """获取板块映射。优先 westock-data，失败回退 akshare。"""
-        cache_key = "sector_mapping"
-        cached = self._read_cache(cache_key)
+        """板块映射。"""
+        try:
+            return self._primary.get_sector_mapping()
+        except Exception:
+            if self._ak:
+                return self._ak.get_sector_mapping()
+            return {}
+
+    def get_sector_list(self) -> pd.DataFrame:
+        """板块行情。"""
+        try:
+            return self._primary.get_sector_list()
+        except Exception:
+            if self._ak:
+                return self._ak.get_sector_list()
+            return pd.DataFrame()
         if cached:
             return cached
 
@@ -289,27 +288,6 @@ class WestockCLI:
             if self._ak:
                 return self._ak.get_sector_mapping()
             return {}
-
-    def get_sector_list(self) -> pd.DataFrame:
-        """获取板块行情列表。优先 westock-data，失败回退 akshare。"""
-        cache_key = "sector_list"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
-        try:
-            output = run_westock(
-                ["query", "--type", "sector_list"],
-                timeout=self._timeout, max_retries=1
-            )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
-        except Exception as e:
-            logger.info(f"westock-data 板块列表失败: {e}，回退 akshare")
-            if self._ak:
-                return self._ak.get_sector_list()
-            return pd.DataFrame()
 
 
 # ---- 全局单例 ----

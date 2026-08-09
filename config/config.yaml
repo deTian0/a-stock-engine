@@ -4,9 +4,9 @@
 
 # --- 账户配置 ---
 account:
-  available_cash: 50000          # 可用资金（元）
+  available_cash: 10000          # 可用资金（元）
   max_position_ratio: 0.80       # 最大仓位比例
-  max_single_stock: 0.10         # 单只股票最大占比
+  max_single_stock: 0.40         # 单只股票最大占比
   holdings:                       # 当前持仓列表
     # 格式: code: {name, shares, cost_price}
     # 示例:

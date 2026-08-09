@@ -1,6 +1,10 @@
 # A股多因子选股系统 — 回测配置
 # 修改参数后直接运行: python local_backtest.py
 
+data:
+  source: sina                  # 数据源: sina | akshare | westock
+  cache_ttl_hours: 1            # 缓存有效期（小时）
+
 portfolio:
   initial_capital: 50000        # 初始资金（元）
   max_picks_per_day: 20         # 每日最多持仓
