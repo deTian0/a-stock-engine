@@ -28,9 +28,10 @@ from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
 logger = logging.getLogger(__name__)
 
 # === CPU 安全参数 ===
-DAY_SLEEP_SEC = 0.05    # 1523天，要快一点
-BATCH_SLEEP_SEC = 0.1   # 每50天休息一下
+DAY_SLEEP_SEC = 0
+BATCH_SLEEP_SEC = 0
 MAX_PER_SECTOR = 5
+BATCH_TRACKING = 20   # 每20天批量写入 rotation tracking，减少磁盘IO
 
 # === 风控参数（v2.2 新增） ===
 RISK_STOP_LOSS_PCT = 8.0       # T+1 止损线 (%)
@@ -214,11 +215,12 @@ class LocalBacktest:
         daily_records = []
         total_picks = 0
 
+        # 缓存本轮选股，批量写入 DB
+        batch_picks = []  # 累积到 BATCH_TRACKING 天再入库
+
         for di, date_str in enumerate(all_dates):
-            # CPU 安全
-            if (di + 1) % 50 == 0:
+            if (di + 1) % 100 == 0:
                 logger.info(f"  进度: {di+1}/{len(all_dates)}")
-                time.sleep(BATCH_SLEEP_SEC)
 
             df = self.load_day_data(date_str)
             if len(df) == 0:
@@ -227,28 +229,26 @@ class LocalBacktest:
             df = self.filter_stocks(df)
             df = self.score_stocks(df)
             picks = self.pick_by_sector(df, MAX_PER_SECTOR)
-
-            # 风控过滤（v2.2）
             picks_risk = self.apply_risk_controls(picks)
 
-            # 入库
             if picks:
-                self.sel_db.save_rotation_picks(
-                    picks, date_str, date_str, "backtest"
-                )
-                for p in picks:
-                    try:
-                        self.sel_db.upsert_pick_frequency(p["code"], "backtest")
-                    except Exception:
-                        pass
-
+                batch_picks.append((date_str, picks))
                 daily_records.append({
                     "date": date_str, "picks": picks, "picks_risk": picks_risk,
                     "filtered": len(df)
                 })
                 total_picks += len(picks)
 
-            time.sleep(DAY_SLEEP_SEC)
+            # 批量入库：每 BATCH_TRACKING 天或最后一天
+            if len(batch_picks) >= BATCH_TRACKING or di == len(all_dates) - 1:
+                for bd, bp in batch_picks:
+                    self.sel_db.save_rotation_picks(bp, bd, bd, "backtest")
+                    for p in bp:
+                        try:
+                            self.sel_db.upsert_pick_frequency(p["code"], "backtest")
+                        except Exception:
+                            pass
+                batch_picks.clear()
 
         logger.info(f"回测完成: {len(daily_records)} 个有效日, {total_picks} 次推荐")
 
