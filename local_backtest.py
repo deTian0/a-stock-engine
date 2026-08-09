@@ -28,9 +28,14 @@ from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
 logger = logging.getLogger(__name__)
 
 # === CPU 安全参数 ===
-DAY_SLEEP_SEC = 0.2       # 每日处理后的休眠
-BATCH_SLEEP_SEC = 0.05    # 每 10 日批次后的休眠
-MAX_PER_SECTOR = 5         # 每板块最大入选数
+DAY_SLEEP_SEC = 0.2
+BATCH_SLEEP_SEC = 0.05
+MAX_PER_SECTOR = 5
+
+# === 风控参数（v2.2 新增） ===
+RISK_STOP_LOSS_PCT = 8.0       # T+1 止损线 (%)
+RISK_MAX_SECTOR_PCT = 20.0     # 单板块最大占比 (%)
+RISK_MAX_STOCK_PCT = 5.0       # 单只股票最大占比 (%)
 
 
 class LocalBacktest:
@@ -83,43 +88,30 @@ class LocalBacktest:
         return pd.Series(0, index=df.index)  # no longer used, kept for compat
 
     def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
-        """按板块分组选 Top N。"""
-        if "sector" not in df.columns:
-            return self._top_n_raw(df, max_per * 10)
+        """按板块分组选 Top N（委托 factor_engine）。"""
+        return pick_top_by_sector(df, max_per)
 
-        picks = []
-        for sector, group in df.groupby("sector"):
-            top = group.head(max_per)
-            for rank, (_, row) in enumerate(top.iterrows(), 1):
-                picks.append({
-                    "sector": str(sector),
-                    "code": str(row.get("code", "")),
-                    "name": str(row.get("name", "")),
-                    "score": round(float(row.get("composite_score", 0)), 2),
-                    "close": float(row.get("close", 0)),
-                    "pe": float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 0,
-                    "market_cap": float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0,
-                    "rank": rank,
-                })
+    def apply_risk_controls(self, picks: list[dict]) -> list[dict]:
+        """风控过滤（v2.2）：板块集中度 + 单股权重限制。"""
+        if not picks:
+            return picks
+        total = len(picks)
+        max_per_sector = int(total * RISK_MAX_SECTOR_PCT / 100)
 
-        logger.debug(f"  {len(df['sector'].unique())} 板块, {len(picks)} 只选中")
-        return picks
+        # 统计板块计数
+        sector_counts = {}
+        filtered = []
+        for p in picks:
+            s = p.get("sector", "未知")
+            cnt = sector_counts.get(s, 0)
+            if cnt >= max_per_sector:
+                continue  # 板块超限，跳过
+            if cnt >= total * RISK_MAX_STOCK_PCT / 100 * 10:
+                continue  # 单股超限
+            sector_counts[s] = cnt + 1
+            filtered.append(p)
 
-    def _top_n_raw(self, df: pd.DataFrame, n: int) -> list[dict]:
-        """无板块信息时的兜底选股。"""
-        picks = []
-        for rank, (_, row) in enumerate(df.head(n).iterrows(), 1):
-            picks.append({
-                "sector": "未知",
-                "code": str(row.get("code", "")),
-                "name": str(row.get("name", "")),
-                "score": round(float(row.get("composite_score", 0)), 2),
-                "close": float(row.get("close", 0)),
-                "pe": float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 0,
-                "market_cap": float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0,
-                "rank": rank,
-            })
-        return picks
+        return filtered
 
     def get_price_on_date(self, code: str, date_str: str) -> Optional[float]:
         """快速查询单只股票在某日的收盘价（直查 SQLite JSON）。"""
@@ -216,6 +208,9 @@ class LocalBacktest:
             df = self.score_stocks(df)
             picks = self.pick_by_sector(df, MAX_PER_SECTOR)
 
+            # 风控过滤（v2.2）
+            picks_risk = self.apply_risk_controls(picks)
+
             # 入库
             if picks:
                 self.db.save_rotation_picks(
@@ -227,28 +222,54 @@ class LocalBacktest:
                     except Exception:
                         pass
 
-                daily_records.append({"date": date_str, "picks": picks, "filtered": len(df)})
+                daily_records.append({
+                    "date": date_str, "picks": picks, "picks_risk": picks_risk,
+                    "filtered": len(df)
+                })
                 total_picks += len(picks)
 
             time.sleep(DAY_SLEEP_SEC)
 
         logger.info(f"回测完成: {len(daily_records)} 个有效日, {total_picks} 次推荐")
 
-        # T+N 验证
+        # T+N 验证 (含止损模拟)
         verify_results = []
+        verify_risk = []
         if verify and daily_records:
-            verify_days = daily_records[-30:]  # 最后 30 天有足够 T+N 数据
+            verify_days = daily_records[-30:]
             logger.info(f"验证 T+N 收益 ({len(verify_days)} 天)...")
             for rec in verify_days:
                 v = self.verify_performance(rec["picks"], rec["date"])
                 verify_results.extend(v)
+                # 风控版: 应用止损
+                for item in v:
+                    item_risk = dict(item)
+                    t1 = item_risk.get("T+1_ret")
+                    if t1 is not None and t1 < -RISK_STOP_LOSS_PCT:
+                        item_risk["T+1_ret"] = -RISK_STOP_LOSS_PCT
+                    verify_risk.append(item_risk)
 
         stats = self._compute_stats(verify_results)
+        stats_risk = self._compute_stats(verify_risk)
+
+        # 风控统计摘要
+        raw_picks = sum(len(r["picks"]) for r in daily_records)
+        risk_picks = sum(len(r.get("picks_risk", r["picks"])) for r in daily_records)
+
         return {
             "total_dates": len(all_dates),
             "valid_dates": len(daily_records),
             "total_picks": total_picks,
             "stats": stats,
+            "stats_risk": stats_risk,
+            "risk_summary": {
+                "before_risk": raw_picks,
+                "after_risk": risk_picks,
+                "removed": raw_picks - risk_picks,
+                "stop_loss": RISK_STOP_LOSS_PCT,
+                "max_sector_pct": RISK_MAX_SECTOR_PCT,
+                "max_stock_pct": RISK_MAX_STOCK_PCT,
+            },
             "verify_results": verify_results,
         }
 
@@ -301,21 +322,24 @@ def main():
     try:
         results = bt.run(verify=True)
         stats = results.get("stats", {})
+        stats_risk = results.get("stats_risk", {})
+        risk_sum = results.get("risk_summary", {})
 
-        # 输出报告
         print(f"\n{'='*60}")
-        print(f"回测结果")
+        print(f"回测结果 v2.2 (含风控)")
         print(f"{'='*60}")
-        print(f"交易日: {results['total_dates']} | 有效日: {results['valid_dates']} | 推荐: {results['total_picks']} 次")
+        print(f"交易日: {results['total_dates']} | 有效日: {results['valid_dates']}")
+        print(f"风控: 移除 {risk_sum.get('removed', 0)} 只 (止损>{RISK_STOP_LOSS_PCT}% / 板块>{RISK_MAX_SECTOR_PCT}%)")
 
         for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
-            if period in stats:
-                s = stats[period]
+            s_raw = stats.get(period, {})
+            s_risk = stats_risk.get(period, {})
+            if s_raw:
                 print(f"\n{period}:")
-                print(f"  样本: {s['count']} | 平均: {s['avg']:+.2f}% | 胜率: {s['win_rate']}%")
-                print(f"  最大: {s['max']:+.2f}% | 最小: {s['min']:+.2f}%")
+                print(f"  原始:  {s_raw['count']}笔 | 均:{s_raw['avg']:+.2f}% | 胜率:{s_raw['win_rate']}%")
+                if s_risk:
+                    print(f"  风控:  {s_risk['count']}笔 | 均:{s_risk['avg']:+.2f}% | 胜率:{s_risk['win_rate']}%")
 
-        # 高频推荐
         most = stats.get("most_picked", [])
         if most:
             print(f"\n高频推荐 Top 10:")
