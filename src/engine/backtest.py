@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # src/
 
 from data.akshare import AkshareProvider
 from data.db import get_db

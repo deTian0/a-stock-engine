@@ -17,8 +17,8 @@ from datetime import datetime
 
 import pandas as pd
 
-# 确保能 import 同目录模块
-sys.path.insert(0, str(Path(__file__).parent))
+# 确保能 import src 下的子包
+sys.path.insert(0, str(Path(__file__).parent.parent))  # src/
 
 from engine.selection import MultiFactorEngine
 from data.db import get_db

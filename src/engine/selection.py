@@ -33,7 +33,7 @@ import pandas as pd
 import numpy as np
 
 # 确保能 import 同目录模块
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # src/
 
 from data.westock import get_cli, sector_of
 from data.local import LocalPriceLoader

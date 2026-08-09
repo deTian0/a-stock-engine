@@ -31,7 +31,7 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # src/
 
 from data.westock import get_cli
 from data.db import get_db
