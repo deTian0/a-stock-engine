@@ -49,7 +49,21 @@ class LocalBacktest:
     def __init__(self):
         self.db = get_market_db()
         self.raw_conn = sqlite3.connect(self.db.db_path)
-        self._dates_cache: Optional[list[str]] = None  # 缓存最近读取的日期数据
+        self._dates_cache: Optional[list[str]] = None
+        self._survivors: Optional[set] = None  # 存活股票集合
+
+    def _compute_survivors(self, min_days: int = 252) -> set:
+        """幸存者偏差校正：排除上市<1年的新股和即将退市的。"""
+        if self._survivors is not None:
+            return self._survivors
+        c = self.raw_conn
+        rows = c.execute(
+            "SELECT code, COUNT(*) as cnt FROM daily_price GROUP BY code HAVING cnt >= ?",
+            (min_days,)
+        ).fetchall()
+        self._survivors = {r[0] for r in rows}
+        logger.info(f"幸存者过滤: {len(self._survivors)} 只 (>={min_days}天)")
+        return self._survivors  # 缓存最近读取的日期数据
 
     def get_available_dates(self) -> list[str]:
         """获取所有可用交易日（后复权CSV + parquet 合并）。"""
@@ -69,6 +83,12 @@ class LocalBacktest:
             "SELECT code, close, pct_chg, vol, amount FROM daily_price WHERE date=?",
             (date_str,)
         ).fetchall()
+        if not rows:
+            return pd.DataFrame()
+
+        # 幸存者过滤
+        survivors = self._compute_survivors()
+        rows = [r for r in rows if r[0] in survivors]
         if not rows:
             return pd.DataFrame()
 
