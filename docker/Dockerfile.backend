@@ -1,0 +1,13 @@
+# Flask 后端
+FROM python:3.13-slim
+WORKDIR /app
+
+COPY api/requirements.txt ./req.txt
+RUN pip install --no-cache-dir -r req.txt
+
+COPY src/ ./src/
+COPY api/ ./api/
+
+ENV PYTHONPATH=/app/src:/app
+EXPOSE 5000
+CMD ["python", "-m", "flask", "--app", "api/app", "run", "--host=0.0.0.0"]
