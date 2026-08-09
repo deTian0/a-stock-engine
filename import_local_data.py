@@ -23,7 +23,7 @@ from database import get_market_db
 logger = logging.getLogger(__name__)
 
 # === 配置 ===
-HOUFUQUAN_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\后复权\2026"
+HOUFUQUAN_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\后复权"   # 2020-2026 全部
 ETF_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\ETF日线行情\行情数据"
 STOCK_BASIC = r"D:\Download\BaiduNetdiskDownload\A股数据\A股日线\stock_basic.parquet"
 PARQUET_PRICE_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\A股日线\1d_price"
@@ -37,7 +37,7 @@ MAX_FILES = None            # None=全部, or e.g. 10 for test
 def import_houfuquan(db, data_dir: str):
     """导入后复权日截面数据。"""
     csv_dir = Path(data_dir)
-    files = sorted(csv_dir.glob("*.csv"))
+    files = sorted(csv_dir.rglob("*.csv"), key=lambda p: (p.parent.name, p.name))
     if MAX_FILES:
         files = files[:MAX_FILES]
 
