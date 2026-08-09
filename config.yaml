@@ -9,6 +9,10 @@ data_source:
   cache_dir: data_cache
 
 env_regime:
+  indices:                       # 参考指数
+    - 000001                     # 上证指数
+    - 399001                     # 深证成指
+    - 399006                     # 创业板指
   bull_threshold: 0.6            # 多少指数站上MA60算多头
   bear_threshold: 0.3            # 多少指数站上MA60算空头
   bull_cap_pct: 100              # 多头仓位 (%)
