@@ -38,25 +38,32 @@ class LocalBacktest:
     def __init__(self):
         self.db = get_db("data_cache/a-stock-engine.db")
         self.raw_conn = sqlite3.connect("data_cache/a-stock-engine.db")
+        self._dates_cache: Optional[list[str]] = None
+        self._day_data_cache: dict[str, pd.DataFrame] = {}  # 缓存最近读取的日期数据
 
     def get_available_dates(self) -> list[str]:
-        """获取 DB 中所有可用日截面日期。"""
+        """获取 DB 中所有可用日截面日期（带缓存）。"""
+        if self._dates_cache is not None:
+            return self._dates_cache
         c = self.raw_conn
         rows = c.execute(
             "SELECT DISTINCT cache_key FROM market_data_cache WHERE data_type='daily_snapshot' ORDER BY cache_key"
         ).fetchall()
-        dates = [r[0].replace("daily_snapshot_", "") for r in rows]
-        logger.info(f"可用日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]})")
-        return dates
+        self._dates_cache = [r[0].replace("daily_snapshot_", "") for r in rows]
+        logger.info(f"可用日期: {len(self._dates_cache)} 天 ({self._dates_cache[0]} ~ {self._dates_cache[-1]})")
+        return self._dates_cache
 
     def load_day_data(self, date_str: str) -> pd.DataFrame:
-        """从 SQLite 加载某日全量截面数据。"""
+        """从 SQLite 加载某日全量截面数据（带内存缓存）。"""
+        if date_str in self._day_data_cache:
+            return self._day_data_cache[date_str]
         cache_key = f"daily_snapshot_{date_str}"
         df = self.db.cache_get(cache_key)
-        if df is None:
-            logger.warning(f"{date_str}: 无数据")
-            return pd.DataFrame()
-        return df
+        if df is not None and len(df) > 0:
+            # 只缓存最近 40 天的数据（用于 T+N 验证）
+            if len(self._day_data_cache) < 40:
+                self._day_data_cache[date_str] = df
+        return df if df is not None else pd.DataFrame()
 
     def filter_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
         """L2 过滤（纯向量化，单次计算）。"""
@@ -154,13 +161,43 @@ class LocalBacktest:
             })
         return picks
 
+    def get_price_on_date(self, code: str, date_str: str) -> Optional[float]:
+        """快速查询单只股票在某日的收盘价（直查 SQLite JSON）。"""
+        c = self.raw_conn
+        row = c.execute(
+            "SELECT data_json FROM market_data_cache WHERE cache_key=?",
+            (f"daily_snapshot_{date_str}",)
+        ).fetchone()
+        if row is None:
+            return None
+        # JSON 中搜索该 code 的 close 价（避免加载全量 DataFrame）
+        import re
+        pattern = f'"code":"{code}"'
+        data = row[0]
+        idx = data.find(pattern)
+        if idx < 0:
+            return None
+        # 从匹配位置往后找 "close": <number>
+        close_idx = data.find('"close":', idx)
+        if close_idx < 0:
+            return None
+        end = data.find(',', close_idx)
+        if end < 0:
+            end = data.find('}', close_idx)
+        if end < 0:
+            return None
+        val_str = data[close_idx+8:end]
+        try:
+            return float(val_str)
+        except ValueError:
+            return None
+
     def verify_performance(self, picks: list[dict], entry_date: str, periods: list[int] = None) -> list[dict]:
-        """T+N 收益验证（纯本地查询，无网络）。"""
+        """T+N 收益验证（直查 SQL，不加载全天数据）。"""
         if periods is None:
             periods = [1, 3, 5]
 
         all_dates = self.get_available_dates()
-        # 找到 entry_date 之后的日期
         date_idx = None
         for i, d in enumerate(all_dates):
             if d >= entry_date:
@@ -181,25 +218,14 @@ class LocalBacktest:
                     perf[f"T+{p}_ret"] = None
                     continue
 
-                target_date = all_dates[target_idx]
-                target_df = self.load_day_data(target_date)
-                if target_df is None or len(target_df) == 0:
-                    perf[f"T+{p}_ret"] = None
-                    continue
-
-                match = target_df[target_df["code"] == code]
-                if len(match) == 0:
-                    perf[f"T+{p}_ret"] = None
-                    continue
-
-                exit_price = float(match.iloc[0]["close"])
-                if exit_price > 0 and entry_price > 0:
+                exit_price = self.get_price_on_date(code, all_dates[target_idx])
+                if exit_price and entry_price and entry_price > 0:
                     perf[f"T+{p}_ret"] = round((exit_price / entry_price - 1) * 100, 2)
-                    perf[f"T+{p}_price"] = exit_price
                 else:
                     perf[f"T+{p}_ret"] = None
 
             results.append(perf)
+
         return results
 
     def run(self, start_date: str = None, end_date: str = None, verify: bool = True) -> dict:
