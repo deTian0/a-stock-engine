@@ -381,6 +381,7 @@ class LocalBacktest:
     def run_portfolio(self) -> dict:
         """资金模拟：5万起，每只有目标/止损，动态持仓周期。"""
         all_dates = self.get_available_dates()
+        all_dates = [d for d in all_dates if d >= "2020-01-01"]  # 只回测 2020+
         c = self.raw_conn
 
         # 市场择时
