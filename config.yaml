@@ -5,7 +5,33 @@ data:
   source: sina                  # 数据源: sina | akshare | westock
   cache_ttl_hours: 1            # 缓存有效期（小时）
 
-portfolio:
+data_source:
+  cache_dir: data_cache
+
+env_regime:
+  bull_threshold: 0.6            # 多少指数站上MA60算多头
+  bear_threshold: 0.3            # 多少指数站上MA60算空头
+  bull_cap_pct: 100              # 多头仓位 (%)
+  bear_cap_pct: 20               # 空头仓位 (%)
+  neutral_cap_pct: 50            # 震荡仓位 (%)
+
+filter_l2:
+  min_market_cap: 20e8           # 最小市值 (20亿)
+  max_pe: 300                    # 最大PE
+  min_close: 1                   # 最低股价
+  exclude_st: true               # 排除ST
+  min_turnover: 0.3              # 最低换手 (%)
+
+factor_l4:
+  max_per_sector: 5              # 每板块最多
+  max_picks: 50                  # 最多候选数
+  factors:
+    value: 0.15                  # 价值因子权重 (PE/PB)
+    quality: 0.20                # 质量因子权重 (ROE/毛利率)
+    growth: 0.15                 # 成长因子权重 (营收增速)
+    momentum: 0.30               # 动量因子权重 (20日/60日涨跌)
+    volatility: 0.10             # 低波因子权重
+    size: 0.10                   # 规模因子权重
   initial_capital: 50000        # 初始资金（元）
   max_picks_per_day: 20         # 每日最多持仓
   min_cash_to_trade: 5000       # 现金低于此数不买入
