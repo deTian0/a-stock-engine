@@ -201,7 +201,9 @@ class LocalBacktest:
 
         return results
 
-    def run(self, start_date: str = None, end_date: str = None, verify: bool = True) -> dict:
+    def run(self, start_date: str = None, end_date: str = None, verify: bool = True,
+            fast: bool = False) -> dict:
+        """运行回测。fast=True 时跳过 DB 写入，只出结果。"""
         """运行完整回测。"""
         all_dates = self.get_available_dates()
 
@@ -239,8 +241,8 @@ class LocalBacktest:
                 })
                 total_picks += len(picks)
 
-            # 批量入库：每 BATCH_TRACKING 天或最后一天
-            if len(batch_picks) >= BATCH_TRACKING or di == len(all_dates) - 1:
+            # 批量入库（fast模式跳过）
+            if not fast and (len(batch_picks) >= BATCH_TRACKING or di == len(all_dates) - 1):
                 for bd, bp in batch_picks:
                     self.sel_db.save_rotation_picks(bp, bd, bd, "backtest")
                     for p in bp:
@@ -332,15 +334,19 @@ class LocalBacktest:
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fast", action="store_true", help="跳过DB写入")
+    a, _ = ap.parse_known_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.info("=" * 60)
-    logger.info("本地数据回测启动 (CPU 安全模式)")
+    logger.info(f"本地数据回测启动 ({'[FAST]' if a.fast else '[CPU]'})")
     logger.info("=" * 60)
 
     bt = LocalBacktest()
 
     try:
-        results = bt.run(verify=True)
+        results = bt.run(verify=True, fast=a.fast)
         stats = results.get("stats", {})
         stats_risk = results.get("stats_risk", {})
         risk_sum = results.get("risk_summary", {})
