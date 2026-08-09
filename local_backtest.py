@@ -35,7 +35,8 @@ MAX_PER_SECTOR = 5
 # === 风控参数（v2.2 新增） ===
 RISK_STOP_LOSS_PCT = 8.0       # T+1 止损线 (%)
 RISK_MAX_SECTOR_PCT = 20.0     # 单板块最大占比 (%)
-RISK_MAX_STOCK_PCT = 5.0       # 单只股票最大占比 (%)
+RISK_MAX_STOCK_PCT = 5.0
+T_PERIODS = [1, 3, 5]        # T+N 验证周期       # 单只股票最大占比 (%)
 
 
 class LocalBacktest:
@@ -202,7 +203,7 @@ class LocalBacktest:
     def run(self, start_date: str = None, end_date: str = None) -> dict:
         """运行回测（纯计算，不写DB）。"""
         all_dates = self.get_available_dates()
-        keep_last = 60  # 只保留最后60天用于T+N验证，其余丢弃
+        keep_last = T_PERIODS[-1] + 5  # 只保留 T+N 验证所需天数
 
         if start_date:
             all_dates = [d for d in all_dates if d >= start_date]
@@ -215,6 +216,12 @@ class LocalBacktest:
         total_picks = 0
 
         # 缓存本轮选股，批量写入 DB
+
+        # 边跑边验：当天选股如果 T+N 数据已就绪，即时验证
+        verify_results = []
+        verify_risk = []
+        max_period = max(T_PERIODS)
+        date_index = {d: i for i, d in enumerate(all_dates)}  # O(1) lookup
 
         for di, date_str in enumerate(all_dates):
             if (di + 1) % 100 == 0:
@@ -236,28 +243,22 @@ class LocalBacktest:
                 })
                 total_picks += len(picks)
 
-            # 只保留最近 keep_last 天，节省内存
-            if len(daily_records) > keep_last:
-                daily_records = daily_records[-keep_last:]
+            # 即时验证：往前找最早可验证的日期（T+N数据已就绪）
+            for rec in list(daily_records):  # 遍历副本
+                if date_str >= rec["date"]:  # 还没到未来，跳过
+                    idx_then = date_index[rec["date"]]
+                    if idx_now - idx_then >= max_period:
+                        v = self.verify_performance(rec["picks"], rec["date"])
+                        verify_results.extend(v)
+                        for item in v:
+                            item_risk = dict(item)
+                            t1 = item_risk.get("T+1_ret")
+                            if t1 is not None and t1 < -RISK_STOP_LOSS_PCT:
+                                item_risk["T+1_ret"] = -RISK_STOP_LOSS_PCT
+                            verify_risk.append(item_risk)
+                        daily_records.remove(rec)  # 已验，移除
 
-        logger.info(f"回测完成: {len(daily_records)} 个有效日 (缓存{keep_last}天), {total_picks} 次推荐")
-
-        # T+N 验证 (含止损模拟)
-        verify_results = []
-        verify_risk = []
-        if daily_records:
-            verify_days = daily_records[-30:]
-            logger.info(f"验证 T+N 收益 ({len(verify_days)} 天)...")
-            for rec in verify_days:
-                v = self.verify_performance(rec["picks"], rec["date"])
-                verify_results.extend(v)
-                # 风控版: 应用止损
-                for item in v:
-                    item_risk = dict(item)
-                    t1 = item_risk.get("T+1_ret")
-                    if t1 is not None and t1 < -RISK_STOP_LOSS_PCT:
-                        item_risk["T+1_ret"] = -RISK_STOP_LOSS_PCT
-                    verify_risk.append(item_risk)
+        logger.info(f"回测完成: {len(daily_records)} 个未验日, {total_picks} 次推荐, {len(verify_results)} 次验证")
 
         stats = self._compute_stats(verify_results)
         stats_risk = self._compute_stats(verify_risk)
