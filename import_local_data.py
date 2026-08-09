@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 HOUFUQUAN_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\后复权\2026"
 ETF_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\ETF日线行情\行情数据"
 STOCK_BASIC = r"D:\Download\BaiduNetdiskDownload\A股数据\A股日线\stock_basic.parquet"
+PARQUET_PRICE_DIR = r"D:\Download\BaiduNetdiskDownload\A股数据\A股日线\1d_price"
 
 CHUNK_SIZE = 1000          # 每块行数
 FILE_SLEEP_SEC = 0.5       # 文件间休眠
@@ -148,6 +149,58 @@ def import_stock_basic(db):
         return 0
 
 
+def import_parquet_prices(db, base_dir: str):
+    """导入 parquet 日线价格数据 → daily_price 表 (CPU安全)。"""
+    import glob
+    base = Path(base_dir)
+    files = sorted(base.rglob("*.parquet"))
+    if MAX_FILES:
+        files = files[:MAX_FILES]
+
+    logger.info(f"Parquet 价格数据: {len(files)} 个文件")
+    total_rows = 0
+
+    for fi, fpath in enumerate(files):
+        try:
+            df = pd.read_parquet(str(fpath))
+            if len(df) == 0:
+                continue
+
+            # 标准化列名
+            col_map = {
+                "code": "code", "date": "date", "open": "open", "high": "high",
+                "low": "low", "close": "close", "pre_close": "pre_close",
+                "change": "change", "pct_chg": "pct_chg", "vol": "vol",
+                "amount": "amount", "adj_factor": "adj_factor",
+            }
+            rows = []
+            for _, row in df.iterrows():
+                r = tuple(
+                    float(row.get(c, 0)) if c not in ("code", "date") and pd.notna(row.get(c))
+                    else str(row.get(c, "")) if c in ("code", "date")
+                    else 0
+                    for c in col_map
+                )
+                # code → str, date → YYYY-MM-DD
+                rows.append((str(r[0]).zfill(6), str(r[1])[:10], *r[2:]))
+
+            if rows:
+                db.bulk_insert_prices(rows)
+                total_rows += len(rows)
+
+            if (fi + 1) % 50 == 0:
+                logger.info(f"  Parquet 进度: {fi+1}/{len(files)}")
+                time.sleep(0.1)
+
+        except Exception as e:
+            logger.debug(f"  {fpath.name}: {e}")
+
+        time.sleep(0.05)  # CPU 保护
+
+    logger.info(f"Parquet 导入完成: {total_rows} 行")
+    return total_rows
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -165,8 +218,11 @@ def main():
         time.sleep(FILE_SLEEP_SEC)
 
         t3 = import_etf(db, ETF_DIR)
+        time.sleep(FILE_SLEEP_SEC)
 
-        logger.info(f"\n导入完成: stock_basic={t1}, 后复权={t2}行, ETF={t3}行")
+        t4 = import_parquet_prices(db, PARQUET_PRICE_DIR)
+
+        logger.info(f"\n导入完成: stock_basic={t1}, 后复权={t2}行, ETF={t3}行, Parquet={t4}行")
 
         # 验证
         total_mb = Path("data_cache/a-stock-engine.db").stat().st_size / (1024 * 1024)
