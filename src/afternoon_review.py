@@ -31,12 +31,66 @@ from pick_tracker import get_tracking_report, track_picks
 logger = logging.getLogger(__name__)
 
 
-def review_sectors(cli, price_loader, config: dict = None) -> str:
+def _fetch_change_pct_westock(codes: list[str]) -> dict[str, float]:
+    """用 westock-data batch kline 获取涨跌幅。一次调用查全部+昨天价格，O(1)网络。"""
+    import subprocess
+    if not codes:
+        return {}
+    
+    ws_codes = ",".join(f"sh{c}" if str(c).startswith(("6","9")) else 
+                        f"sz{c}" if str(c).startswith(("0","2","3")) else 
+                        f"bj{c}" for c in codes)
+    
+    try:
+        result = subprocess.run(
+            ["npx", "-y", "westock-data-skillhub@1.0.5", "kline", ws_codes,
+             "--period", "day", "--limit", "2"],
+            capture_output=True, text=True, timeout=30, check=False
+        )
+        if result.returncode != 0 or not result.stdout:
+            return {}
+        
+        # 解析 batch 输出: symbol | date | open | last | ... 
+        # 按符号排序，每个符号 2 行（今天 + 昨天）
+        lines = result.stdout.strip().split("\n")
+        latest = {}
+        prev = {}
+        for line in lines:
+            if not line or "|" not in line or line.startswith("[") or line.startswith("| symbol"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 6:
+                continue
+            symbol = parts[1].strip().replace("sh","").replace("sz","").replace("bj","").zfill(6)
+            close = float(parts[4]) if len(parts) > 4 else 0
+            if symbol not in latest:
+                latest[symbol] = close
+            elif symbol not in prev:
+                prev[symbol] = close
+        
+        changes = {}
+        for code, today in latest.items():
+            yesterday = prev.get(code, today)
+            if yesterday and yesterday > 0:
+                changes[code] = round((today / yesterday - 1) * 100, 2)
+        logger.info(f"westock涨跌幅: {len(changes)} 只 (批量kline)")
+        return changes
+    except Exception as e:
+        logger.debug(f"westock涨跌幅获取失败: {e}")
+        return {}
+
+
+def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
+                    preloaded_prices: dict = None, config: dict = None) -> str:
     """
     板块复盘: 获取今日最强板块，分析上涨动因。
     """
     if config is None:
         config = {}
+    if all_stocks is None:
+        all_stocks = pd.DataFrame()
+    if preloaded_prices is None:
+        preloaded_prices = {}
     lines = []
     lines.append(f"# 盘后复盘报告 — {datetime.now().strftime('%Y-%m-%d')}\n")
     lines.append(f"> 生成时间: {datetime.now().strftime('%H:%M')}\n")
@@ -46,11 +100,8 @@ def review_sectors(cli, price_loader, config: dict = None) -> str:
     # ============================================================
     lines.append("## 一、今日最强板块 Top 5\n")
 
-    # 获取全市场数据（含涨跌幅 + 板块映射）
-    try:
-        stock_list = cli.get_stock_list()
-    except Exception:
-        stock_list = pd.DataFrame()
+    # 使用传入的 all_stocks（避免重复 CLI 调用）
+    stock_list = all_stocks if len(all_stocks) > 0 else pd.DataFrame()
 
     sector_mapping = {}
     sector_stocks = {}
@@ -61,6 +112,13 @@ def review_sectors(cli, price_loader, config: dict = None) -> str:
 
     # 按行业聚合: 平均涨幅、总成交额
     if len(stock_list) > 0 and "code" in stock_list.columns:
+        # 注入 westock-data 实时涨跌幅（tushare 不含 change_pct）
+        if "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all():
+            sample_codes = stock_list["code"].astype(str).str.zfill(6).head(100).tolist()
+            chg_map = _fetch_change_pct_westock(sample_codes)
+            if chg_map:
+                stock_list["change_pct"] = stock_list["code"].astype(str).str.zfill(6).map(chg_map)
+                logger.info(f"已注入westock涨跌幅: {stock_list['change_pct'].notna().sum()} 只")
         stock_list["sector"] = stock_list["code"].map(sector_mapping).fillna("综合")
         sector_agg = stock_list.groupby("sector").agg(
             avg_chg=("change_pct", "mean"),
@@ -218,12 +276,10 @@ def review_sectors(cli, price_loader, config: dict = None) -> str:
 def _batch_preload_prices(codes: list[str], config: dict,
                           price_loader) -> dict[str, list[float]]:
     """
-    批量预取近20日收盘价。优先 DB，缺失用线程池 API 补全并写回 DB。
+    批量预取近20日收盘价。优先 DB，缺失用顺序 API 补全并写回 DB。
     返回: {code: [close_prices_last_20_days]}
     """
     from database import get_market_db
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import time
 
     mdb = get_market_db()
     results = {}
@@ -254,18 +310,16 @@ def _batch_preload_prices(codes: list[str], config: dict,
         logger.info(f"K线预取: {db_hit}/{len(codes)} DB命中, 无需API补全")
         return results
 
-    # Step 2: 线程池 API 补全
-    workers = config.get("concurrency", {}).get("review_workers", 8)
-    logger.info(f"K线预取: {db_hit}/{len(codes)} DB命中, {len(missing)} 只API补全 ({workers} workers)")
-
-    def _fetch_one(code):
+    # Step 2: 顺序 API 补全（CPU-safe + SQLite 线程安全）
+    api_hit = 0
+    for code in missing:
         try:
             df = price_loader.get_price(code, days=20)
             if len(df) >= 20 and "close" in df.columns:
                 closes = df["close"].tolist()
                 # 写回 DB
                 rows_to_insert = []
-                for j, (_, r) in enumerate(df.iterrows()):
+                for _, r in df.iterrows():
                     date = str(r.get("date", ""))[:10]
                     rows_to_insert.append((
                         f"{code}.SZ", date,
@@ -279,19 +333,10 @@ def _batch_preload_prices(codes: list[str], config: dict,
                         mdb.bulk_insert_prices(rows_to_insert)
                     except Exception:
                         pass
-                return code, closes
-        except Exception:
-            return code, None
-        return code, None
-
-    api_hit = 0
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_fetch_one, c): c for c in missing}
-        for future in as_completed(futures):
-            code, closes = future.result()
-            if closes:
                 results[code] = closes[:20]
                 api_hit += 1
+        except Exception:
+            pass
 
     logger.info(f"K线预取完成: DB={db_hit} API={api_hit} 总计={len(results)}/{len(codes)}")
     return results
@@ -350,18 +395,24 @@ def main():
         config = {}
 
     try:
-        content = review_sectors(cli, price_loader, config)
+        # 预取全市场数据（用于板块聚合 + T+0验证 + 盘后追踪）
+        all_stocks = cli.get_stock_list()
+        codes_for_prices = []
+        if len(all_stocks) > 0 and "code" in all_stocks.columns:
+            codes_for_prices = all_stocks.nlargest(50, "change_pct")["code"].tolist() if "change_pct" in all_stocks.columns else all_stocks["code"].head(300).tolist()
+        preloaded_prices = _batch_preload_prices(codes_for_prices, config, price_loader)
+
+        content = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
 
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")
-        save_dir = Path("history") / today
+        save_dir = Path("briefs") / today
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / "盘后复盘报告.md"
         save_path.write_text(content, encoding="utf-8")
 
         # 记录盘后命中追踪
         try:
-            all_stocks = cli.get_stock_list()
             if len(all_stocks) > 0 and "change_pct" in all_stocks.columns:
                 top_gainers = all_stocks.nlargest(30, "change_pct")
                 if "code" in top_gainers.columns:
