@@ -19,6 +19,36 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 PASS, FAIL = 0, 0
+FAILED_ITEMS = []   # 汇总所有未通过项: {group, name, detail, kind}
+CURRENT_GROUP = ""  # 当前测试组名（由 main 在调用各 test_* 前设置）
+
+# 各测试组对应的「修复建议」——方便定位要改的数据/配置
+GROUP_HINTS = {
+    "① tushare名称": "数据源 Tushare：检查 .env 中的 TUSHARE_TOKEN 是否有效、网络能否出网（火绒可能拦截 Python 出网）、stock_basic 接口返回。",
+    "② westock股价": "数据源 westock-data：检查 westock CLI 是否安装可用、Node 环境是否正常、batch_close_prices 返回。",
+    "③ westock技术面": "数据源 westock-data：检查 westock_helpers.batch_tech_indicators 与 CLI 技术指标返回。",
+    "④ tushare概念": "数据源 Tushare：检查 get_concept_stats 接口、TUSHARE_TOKEN 积分是否足够（概念板块需 5000+ 积分）。",
+    "⑤ data_enricher补全": "补全链路：检查 data_enricher.enrich_and_report 中 名称/股价/概念/技术面 的回填逻辑与上游数据。",
+    "⑥ risk_module风控": "风控模块：检查 risk_module.enrich_risk_metrics 的 ATR 止损价/Kelly 仓位/流动性标签计算。",
+    "⑦ HTML报告": "报告渲染：检查 html_report.generate_html 的模板与传入的 mock 数据结构。",
+    "⑧ 全链路": "引擎全链路：检查 multifactor.MultiFactorEngine.run 的 L2/L4 过滤与各因子数据源回填。",
+}
+
+
+def record_exception(e, exc_info=False):
+    """记录一次测试级异常到未通过清单（同时计入 FAIL）。"""
+    global FAIL
+    FAIL += 1
+    FAILED_ITEMS.append({
+        "group": CURRENT_GROUP,
+        "name": "测试抛出异常",
+        "detail": str(e),
+        "kind": "exception",
+    })
+    if exc_info:
+        logger.error(f"  ❌ 测试异常: {e}", exc_info=True)
+    else:
+        logger.error(f"  ❌ 测试异常: {e}")
 
 
 def check(name, condition, detail=""):
@@ -29,6 +59,12 @@ def check(name, condition, detail=""):
     else:
         logger.error(f"  ❌ {name}: FAIL {detail}")
         FAIL += 1
+        FAILED_ITEMS.append({
+            "group": CURRENT_GROUP,
+            "name": name,
+            "detail": detail,
+            "kind": "check",
+        })
 
 
 def test_1_tushare_names():
@@ -50,7 +86,7 @@ def test_1_tushare_names():
                     actual = str(matches.iloc[0]["name"])
                     check(f"{code}={actual}", expected in actual, "")
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}")
+        record_exception(e)
 
 
 def test_2_westock_prices():
@@ -64,7 +100,7 @@ def test_2_westock_prices():
         for c in codes:
             check(f"{c}有价格", c in prices and prices[c] > 0, f"={prices.get(c)}")
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}")
+        record_exception(e)
 
 
 def test_3_westock_tech():
@@ -82,7 +118,7 @@ def test_3_westock_tech():
                 check(f"{c}.ma非空", t.get("ma","-") != "-", f"={t['ma']}")
                 check(f"{c}.macd非空", t.get("macd","-") != "-", f"={t['macd']}")
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}")
+        record_exception(e)
 
 
 def test_4_tushare_concepts():
@@ -99,7 +135,7 @@ def test_4_tushare_concepts():
             valid = cs["concept_name"].notna().sum()
             check(f"概念名称有效", valid > 100, f"{valid} 有效")
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}")
+        record_exception(e)
 
 
 def test_5_data_enricher():
@@ -124,7 +160,7 @@ def test_5_data_enricher():
         if "signal_grade" in enriched.columns:
             check("信号强度评级", enriched["signal_grade"].notna().all(), f"={enriched['signal_grade'].tolist()}")
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}", exc_info=True)
+        record_exception(e, exc_info=True)
 
 
 def test_6_risk_module():
@@ -145,7 +181,7 @@ def test_6_risk_module():
         check("仓位补全", "suggested_position" in enriched.columns)
         check("流动性标签", "liquidity_tag" in enriched.columns)
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}")
+        record_exception(e)
 
 
 def test_7_html_report():
@@ -177,7 +213,7 @@ def test_7_html_report():
         check("含ECharts", "echarts" in html.lower())
         check("含简体中文", "盘前选股" in html)
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}")
+        record_exception(e)
 
 
 def test_8_full_chain():
@@ -216,32 +252,53 @@ def test_8_full_chain():
                 tech_ok = l4["tech_signal"].notna().sum()
                 check(f"技术面有效", tech_ok > 0, f"{tech_ok}/{len(l4)}")
     except Exception as e:
-        logger.error(f"  ❌ 异常: {e}", exc_info=True)
+        record_exception(e, exc_info=True)
 
 
 def main():
-    global PASS, FAIL
+    global PASS, FAIL, CURRENT_GROUP
     logger.info("=" * 60)
     logger.info("全链路验证开始")
     logger.info("=" * 60)
-    
-    test_1_tushare_names()
-    test_2_westock_prices()
-    test_3_westock_tech()
-    test_4_tushare_concepts()
-    test_5_data_enricher()
-    test_6_risk_module()
-    test_7_html_report()
-    test_8_full_chain()
-    
+
+    test_plan = [
+        ("① tushare名称", test_1_tushare_names),
+        ("② westock股价", test_2_westock_prices),
+        ("③ westock技术面", test_3_westock_tech),
+        ("④ tushare概念", test_4_tushare_concepts),
+        ("⑤ data_enricher补全", test_5_data_enricher),
+        ("⑥ risk_module风控", test_6_risk_module),
+        ("⑦ HTML报告", test_7_html_report),
+        ("⑧ 全链路", test_8_full_chain),
+    ]
+    for group, fn in test_plan:
+        CURRENT_GROUP = group
+        try:
+            fn()
+        except Exception as e:
+            record_exception(e, exc_info=True)
+
+    # ===== 末尾汇总：未通过项清单 =====
     logger.info("=" * 60)
     logger.info(f"结果: {PASS} PASS / {FAIL} FAIL")
-    if FAIL == 0:
-        logger.info("✅ 全链路通过! 数据补全正常")
+    if FAILED_ITEMS:
+        logger.error("=" * 60)
+        logger.error(f"❌ 共 {FAIL} 项未通过，请按下列清单针对性修改相关数据/配置：")
+        for idx, item in enumerate(FAILED_ITEMS, 1):
+            if item["kind"] == "check":
+                suffix = f"  → {item['detail']}" if item["detail"] else ""
+                logger.error(f"  {idx:>2}. [{item['group']}] {item['name']}{suffix}")
+            else:
+                logger.error(f"  {idx:>2}. [{item['group']}] 异常: {item['detail']}")
+        logger.error("-" * 60)
+        logger.error("修复建议（仅列出失败项所属模块）：")
+        for group, hint in GROUP_HINTS.items():
+            if any(i["group"] == group for i in FAILED_ITEMS):
+                logger.error(f"  [{group}] {hint}")
     else:
-        logger.error(f"❌ {FAIL} 项失败，需修复")
+        logger.info("✅ 全链路通过! 数据补全正常")
     logger.info("=" * 60)
-    
+
     return PASS, FAIL
 
 
