@@ -88,7 +88,7 @@ def generate_brief(results: dict, config: dict) -> str:
     if judgment:
         lines.append(f"_{judgment}_\n")
     lines.append("\n| 指数 | 收盘 | MA20 | MA60 | 站上MA60 |")
-    lines.append("|------|------|------|------|----------|")
+    lines.append("|------|------|------|------|------|----------|")
     if isinstance(regime, dict):
         for code, info in regime.get("indices", {}).items():
             if "error" in info:
@@ -112,12 +112,15 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
     if len(long_term) > 0:
-        lines.append("| 代码 | 名称 | 板块 | 评分 | 持有期 | 预期净收益 | 获利概率 |")
-        lines.append("|------|------|------|------|--------|-----------|----------|")
+        lines.append("| 代码 | 名称 | 板块 | 概念 | 评分 | 持有期 | 预期净收益 | 获利概率 |")
+        lines.append("|------|------|------|------|------|--------|-----------|----------|")
         for _, row in long_term.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)
             sector = row.get("sector", "-")
+            concept = row.get("concept_name", "")
+            if not concept or str(concept).lower() in ("nan", "none"):
+                concept = "-"
             score = row.get("composite_score", 0)
             period = _hold_period(row)
             net_ret = _net_return(score)
@@ -126,7 +129,7 @@ def generate_brief(results: dict, config: dict) -> str:
                               if pd.notna(row.get(f)) and row.get(f) != 0)
             prob = min(85, 50 + factor_count * 8 + max(0, (score - 60) * 0.5))
             lines.append(
-                f"| {code} | {name} | {sector} | {score:.1f} | {period} | "
+                f"| {code} | {name} | {sector} | {concept} | {score:.1f} | {period} | "
                 f"{net_ret:+.1f}% | {prob:.0f}% |"
             )
     else:
@@ -146,14 +149,18 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 三、短线组合（{len(short_df)} 只，建议持仓 1-5 日）\n")
     if len(short_df) > 0:
-        lines.append("| 代码 | 名称 | 板块 | 评分 | 动量20日 | 量比信号 | 预期净收益 |")
-        lines.append("|------|------|------|------|---------|---------|-----------|")
+        lines.append("| 代码 | 名称 | 板块 | 概念 | 评分 | 动量20日 | 概念涨跌 | 预期净收益 |")
+        lines.append("|------|------|------|------|------|---------|---------|-----------|")
         for _, row in short_df.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)
             sector = row.get("sector", "-")
+            concept = row.get("concept_name", "")
+            if not concept or str(concept).lower() in ("nan", "none"):
+                concept = "-"
             score = row.get("composite_score", 0)
             mom20 = _fmt_pct(row.get("momentum_20d"))
+            concept_chg = _fmt_pct(row.get("concept_chg"))
             # 短线需关注反弹信号
             decline = row.get("decline_10d", None)
             vol_ratio = row.get("volume_ratio", None)
@@ -163,7 +170,7 @@ def generate_brief(results: dict, config: dict) -> str:
                 signal = "-"
             net_ret = _net_return(score)
             lines.append(
-                f"| {code} | {name} | {sector} | {score:.1f} | {mom20} | "
+                f"| {code} | {name} | {sector} | {concept} | {score:.1f} | {mom20} | {concept_chg} | "
                 f"{signal} | {net_ret:+.1f}% |"
             )
     else:
@@ -214,8 +221,8 @@ def generate_brief(results: dict, config: dict) -> str:
     watchlist = categories.get("③C_观察名单")
     lines.append(f"\n## 六、观察名单（{len(watchlist) if watchlist is not None else 0} 只）\n")
     if watchlist is not None and len(watchlist) > 0:
-        lines.append("| 代码 | 名称 | 板块 | 评分 | 关注理由 |")
-        lines.append("|------|------|------|------|----------|")
+        lines.append("| 代码 | 名称 | 板块 | 概念 | 评分 | 关注理由 |")
+        lines.append("|------|------|------|------|------|----------|")
         for _, row in watchlist.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)

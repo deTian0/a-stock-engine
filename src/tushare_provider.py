@@ -486,6 +486,110 @@ class TushareProvider:
             logger.warning(f"tushare 板块列表获取失败: {e}")
             return pd.DataFrame()
 
+    # ============================================================
+    #  概念板块归属 + 行情统计（同花顺 THS）
+    # ============================================================
+
+    def get_concept_stats(self) -> pd.DataFrame:
+        """
+        获取同花顺概念板块行情 + 股票→概念映射。
+        返回 DataFrame: code, concept_name, concept_chg(涨幅%), concept_amount(成交额)
+
+        首次调用需约30s加载全量概念成员（5000+只×N个概念），后续缓存7天。
+        """
+        cache_key = "concept_stats"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        logger.info("加载同花顺概念板块数据...")
+        try:
+            # Step 1: 概念列表
+            concepts = self.pro.ths_index(exchange="A", type="N")
+            if concepts is None or len(concepts) == 0:
+                return pd.DataFrame()
+            concept_codes = concepts[concepts["ts_code"].notna()]["ts_code"].tolist()
+            concept_names = dict(zip(concepts["ts_code"], concepts["name"]))
+            logger.info(f"概念板块: {len(concept_codes)} 个")
+
+            # Step 2: 概念日行情（仅取最近一天）
+            today_ts = datetime.now().strftime("%Y%m%d")
+            daily_data = []
+            batch_size = 500
+            for i in range(0, len(concept_codes), batch_size):
+                batch = ",".join(concept_codes[i:i + batch_size])
+                try:
+                    d = self.pro.ths_daily(ts_code=batch,
+                                           start_date=(datetime.now() - timedelta(days=7)).strftime("%Y%m%d"),
+                                           end_date=today_ts,
+                                           fields="ts_code,trade_date,pct_change,vol,amount")
+                    if d is not None and len(d) > 0:
+                        daily_data.append(d[d["trade_date"] == d["trade_date"].max()])
+                except Exception:
+                    continue
+            daily_df = pd.concat(daily_data, ignore_index=True) if daily_data else pd.DataFrame()
+            concept_perf = {}
+            if len(daily_df) > 0:
+                for _, r in daily_df.iterrows():
+                    concept_perf[str(r["ts_code"])] = {
+                        "chg": r.get("pct_change", 0) if pd.notna(r.get("pct_change")) else 0,
+                        "amount": r.get("amount", 0) if pd.notna(r.get("amount")) else 0,
+                    }
+            logger.info(f"概念行情: {len(concept_perf)} 条 今日数据")
+
+            # Step 3: 概念成员映射（股票→所属概念，缓存7天）
+            member_cache_key = "concept_members"
+            member_map = self.db.cache_get(member_cache_key)  # {ts_code: [(con_code, con_name)]}
+            if member_map is None:
+                member_map = {}
+                for i in range(0, len(concept_codes), 100):
+                    batch = ",".join(concept_codes[i:i + 100])
+                    try:
+                        m = self.pro.ths_member(ts_code=batch)
+                        if m is not None and len(m) > 0:
+                            for _, r in m.iterrows():
+                                stock_code = _from_ts_code(str(r["con_code"]))
+                                con_code = str(r["ts_code"])
+                                con_name = concept_names.get(con_code, "")
+                                if stock_code not in member_map:
+                                    member_map[stock_code] = []
+                                member_map[stock_code].append((con_code, con_name))
+                    except Exception:
+                        continue
+                member_df = pd.DataFrame([
+                    {"code": k, "concepts": v}
+                    for k, v in member_map.items()
+                ])
+                self.db.cache_put(member_cache_key, "concept_members", member_df, self._source, 168)
+
+            # Step 4: 为每只股票选最热概念（按当日涨幅排序取Top1）
+            result_rows = []
+            for code, con_list in member_map.items():
+                best = None
+                best_chg = -999
+                for con_code, con_name in con_list:
+                    perf = concept_perf.get(con_code, {})
+                    chg = perf.get("chg", 0)
+                    if chg > best_chg:
+                        best_chg = chg
+                        best = {
+                            "code": code,
+                            "concept_name": con_name,
+                            "concept_chg": round(chg, 2),
+                            "concept_amount": perf.get("amount", 0),
+                        }
+                if best:
+                    result_rows.append(best)
+
+            result = pd.DataFrame(result_rows)
+            if len(result) > 0:
+                self.db.cache_put(cache_key, "concept_stats", result, self._source, 6)
+                logger.info(f"概念归属: {len(result)} 只股票映射完成")
+            return result
+        except Exception as e:
+            logger.warning(f"概念板块获取失败: {e}")
+            return pd.DataFrame()
+
 
 # ================================================================
 #  全局单例

@@ -884,6 +884,26 @@ class MultiFactorEngine:
         # ETF 选股
         etf_picks = self.select_etfs()
 
+        # 概念板块归属增强
+        concept_stats = pd.DataFrame()
+        try:
+            from tushare_provider import get_tushare
+            ts = get_tushare()
+            concept_stats = ts.get_concept_stats()
+            if len(concept_stats) > 0 and len(l4_results) > 0:
+                # 合并：给 l4_results 每只股票加上最热概念
+                cs = concept_stats[["code", "concept_name", "concept_chg", "concept_amount"]]
+                l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
+                cs["code_str"] = cs["code"].astype(str).str.zfill(6)
+                l4_results = l4_results.merge(
+                    cs[["code_str", "concept_name", "concept_chg"]],
+                    on="code_str", how="left"
+                )
+                l4_results.drop(columns=["code_str"], inplace=True)
+                logger.info(f"概念板块增强: {l4_results['concept_name'].notna().sum()} 只")
+        except Exception as e:
+            logger.debug(f"概念板块增强跳过: {e}")
+
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")
 
