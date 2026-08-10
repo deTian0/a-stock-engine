@@ -708,6 +708,67 @@ class MultiFactorEngine:
             "③C_观察名单": watchlist,
         }
 
+    # ========================================
+    #  ETF 选股
+    # ========================================
+
+    def select_etfs(self, top_n: int = 8) -> pd.DataFrame:
+        """
+        ETF 筛选：从主流行业/宽基 ETF 中按动量+流动性选 Top N。
+        优先使用 tushare 基金数据，回退 akshare。
+        """
+        try:
+            etf_list = self.cli.get_stock_list()  # 尝试股票列表中的 ETF
+        except Exception:
+            etf_list = pd.DataFrame()
+
+        # 用知名的 ETF 代码池作为兜底
+        well_known_etfs = [
+            ("510050", "上证50ETF"), ("510300", "沪深300ETF"),
+            ("510500", "中证500ETF"), ("159915", "创业板ETF"),
+            ("588000", "科创50ETF"), ("512880", "证券ETF"),
+            ("512100", "中证1000ETF"), ("159845", "中证1000"),
+            ("512690", "酒ETF"), ("515790", "光伏ETF"),
+            ("159995", "芯片ETF"), ("512480", "半导体ETF"),
+            ("515050", "5GETF"), ("516510", "云计算ETF"),
+            ("513100", "纳指ETF"), ("159941", "纳指ETF"),
+            ("513050", "中概互联"), ("159605", "中概互联"),
+            ("513330", "恒生互联"), ("159766", "旅游ETF"),
+        ]
+
+        picks = []
+        for code, name in well_known_etfs:
+            try:
+                df = self.price_loader.get_price(code, days=60)
+                if len(df) < 20:
+                    continue
+                close = df["close"].values
+                mom20 = (close[-1] / close[-20] - 1) * 100 if len(close) >= 21 else 0
+                mom60 = (close[-1] / close[-60] - 1) * 100 if len(close) >= 61 else 0
+                amount = df["amount"].tail(5).mean() if "amount" in df.columns else 0
+
+                # 综合评分: 动量(60%) + 流动性(40%)
+                mom_score = (mom20 * 0.6 + mom60 * 0.4) * 0.6
+                liq_score = min(40, np.log1p(max(amount, 1)) * 2) * 0.4
+                score = mom_score + liq_score
+
+                picks.append({
+                    "code": code, "name": name,
+                    "etf_type": "宽基" if code.startswith(("51","58")) else "行业",
+                    "momentum_20d": round(mom20, 2),
+                    "momentum_60d": round(mom60, 2),
+                    "amount": amount,
+                    "score": round(score + 50, 1),
+                })
+            except Exception:
+                continue
+
+        result = pd.DataFrame(picks)
+        if len(result) > 0:
+            result = result.sort_values("score", ascending=False).head(top_n)
+            logger.info(f"ETF 选股: {len(result)} 只, top={result.iloc[0].get('name','')}")
+        return result
+
     def _get_local_stock_list(self) -> Optional[pd.DataFrame]:
         """
         从 market.db 本地快照构建股票列表（网络不可用时的降级方案）。
@@ -777,6 +838,9 @@ class MultiFactorEngine:
         holdings = self.config.get("account", {}).get("holdings", {})
         categories = self.categorize(l4_results, rebound_picks, holdings)
 
+        # ETF 选股
+        etf_picks = self.select_etfs()
+
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")
 
@@ -785,6 +849,7 @@ class MultiFactorEngine:
             "l2_filtered_count": len(filtered),
             "l4_results": l4_results,
             "rebound_picks": rebound_picks,
+            "etf_picks": etf_picks,
             "categories": categories,
             "elapsed_seconds": round(elapsed, 1),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

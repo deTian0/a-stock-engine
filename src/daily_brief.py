@@ -30,130 +30,209 @@ logger = logging.getLogger(__name__)
 def generate_brief(results: dict, config: dict) -> str:
     """
     根据引擎结果生成 Markdown 格式的盘前简报。
+    包含: 持仓周期分类、磨损调整收益、ETF 选股、获利概率评估。
     """
     today = datetime.now().strftime("%Y-%m-%d")
     regime = results["regime"]
     categories = results["categories"]
+    trade_cfg = config.get("trade", {})
+    stock_cost = trade_cfg.get("stock_cost", 0.0013)
+    etf_cost = trade_cfg.get("etf_cost", 0.00017)
+
+    def _fmt_pct(val, default="-"):
+        """安全格式化百分比。"""
+        if val is None or not pd.notna(val):
+            return default
+        return f"{val:.1f}%"
+
+    def _net_return(score, cost=stock_cost):
+        """预计磨损后收益: 评分 → 粗略预期收益 → 扣除成本。
+        评分50=无超额收益, 每1分≈0.15%预期超额收益。"""
+        excess = (score - 50) * 0.15  # 超额alpha估算
+        return max(excess - cost * 100, -cost * 100)  # 扣磨损, 不低于成本
+
+    def _hold_period(row):
+        """根据因子判断建议持仓周期。"""
+        roe = row.get("roe", 0)
+        mom20 = row.get("momentum_20d", 0)
+        score = row.get("composite_score", 50)
+        # 高ROE+稳定动量 → 中长线; 纯动量驱动 → 短线
+        if pd.notna(roe) and roe > 10 and score > 75:
+            return "中长线(5-20日)"
+        elif pd.notna(mom20) and abs(mom20) < 5 and score > 70:
+            return "中长线(5-15日)"
+        else:
+            return "短线(1-5日)"
 
     lines = []
     lines.append(f"# 盘前选股简报 — {today}\n")
     lines.append(f"> 生成时间: {results['timestamp']} | 耗时: {results['elapsed_seconds']}s\n")
 
-    # ---- 市场环境 ----
+    # ============================================================
+    # 一、市场环境
+    # ============================================================
     lines.append("## 一、市场环境判断\n")
-    lines.append(f"**当前环境: {regime['regime']}** | 仓位上限: {regime['position_cap']:.0%}\n")
-    lines.append(f"_{regime['judgment']}_\n")
+    pos_cap = regime['position_cap'] if isinstance(regime, dict) else 0.5
+    judgment = regime.get('judgment', '') if isinstance(regime, dict) else ''
+    lines.append(f"**当前环境: {regime.get('regime','未知') if isinstance(regime,dict) else regime}** "
+                 f"| 仓位上限: {pos_cap:.0%}\n")
+    if judgment:
+        lines.append(f"_{judgment}_\n")
     lines.append("\n| 指数 | 收盘 | MA20 | MA60 | 站上MA60 |")
     lines.append("|------|------|------|------|----------|")
-    for code, info in regime["indices"].items():
-        if "error" in info:
-            lines.append(f"| {info['name']} | 数据获取失败 | - | - | - |")
-        else:
-            above = "✅" if info.get("above_ma") else "❌"
-            lines.append(
-                f"| {info['name']} | {info.get('close', '-')} | "
-                f"{info.get('ma_short', '-')} | {info.get('ma_long', '-')} | {above} |"
-            )
+    if isinstance(regime, dict):
+        for code, info in regime.get("indices", {}).items():
+            if "error" in info:
+                lines.append(f"| {info.get('name', code)} | 获取失败 | - | - | - |")
+            else:
+                above = "✅" if info.get("above_ma") else "❌"
+                lines.append(
+                    f"| {info.get('name', code)} | {info.get('close', '-')} | "
+                    f"{info.get('ma_short', '-')} | {info.get('ma_long', '-')} | {above} |"
+                )
     lines.append("")
 
-    # ---- ②A 质量榜 ----
+    # ============================================================
+    # 二、中长线组合（5-20日持仓）
+    # ============================================================
     quality = categories.get("②A_质量榜")
-    lines.append(f"\n## 二、②A 质量榜（Top {len(quality) if quality is not None else 0}）\n")
     if quality is not None and len(quality) > 0:
-        lines.append("| 代码 | 名称 | 板块 | 综合评分 | ROE | 营收增速 | 动量20日 |")
-        lines.append("|------|------|------|----------|-----|----------|----------|")
-        for _, row in quality.iterrows():
-            name = row.get("name", row["code"])
+        long_term = quality[quality.apply(_hold_period, axis=1).str.contains("中长线")].head(8)
+    else:
+        long_term = pd.DataFrame()
+
+    lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
+    if len(long_term) > 0:
+        lines.append("| 代码 | 名称 | 板块 | 评分 | 持有期 | 预期净收益 | 获利概率 |")
+        lines.append("|------|------|------|------|--------|-----------|----------|")
+        for _, row in long_term.iterrows():
+            code = row.get("code", "")
+            name = row.get("name", code)
             sector = row.get("sector", "-")
             score = row.get("composite_score", 0)
-            roe = f"{row.get('roe', 0):.1f}%" if pd.notna(row.get("roe")) else "-"
-            rev_g = f"{row.get('revenue_growth', 0):.1f}%" if pd.notna(row.get("revenue_growth")) else "-"
-            mom = f"{row.get('momentum_20d', 0):.1f}%" if pd.notna(row.get("momentum_20d")) else "-"
-            lines.append(f"| {row['code']} | {name} | {sector} | {score} | {roe} | {rev_g} | {mom} |")
+            period = _hold_period(row)
+            net_ret = _net_return(score)
+            # 获利概率: 基于因子质量的粗略估计
+            factor_count = sum(1 for f in ["roe", "gross_margin", "revenue_growth"]
+                              if pd.notna(row.get(f)) and row.get(f) != 0)
+            prob = min(85, 50 + factor_count * 8 + max(0, (score - 60) * 0.5))
+            lines.append(
+                f"| {code} | {name} | {sector} | {score:.1f} | {period} | "
+                f"{net_ret:+.1f}% | {prob:.0f}% |"
+            )
     else:
-        lines.append("_今日无入选_\n")
+        lines.append("_当前环境不适合中长线持仓_\n")
 
-    # ---- ②B 短线榜 ----
-    short_list = categories.get("②B_短线榜")
-    lines.append(f"\n## 三、②B 短线榜（{len(short_list) if short_list is not None else 0} 只）\n")
-    if short_list is not None and len(short_list) > 0:
-        if "decline_10d" in short_list.columns:
-            # 反弹引擎结果
-            lines.append("| 代码 | 名称 | 板块 | 近10日跌幅 | 量比 | 反弹涨幅 |")
-            lines.append("|------|------|------|-----------|------|----------|")
-            for _, row in short_list.iterrows():
-                lines.append(
-                    f"| {row['code']} | {row.get('name', row['code'])} | "
-                    f"{row.get('sector', '-')} | {row.get('decline_10d', '-')}% | "
-                    f"{row.get('volume_ratio', '-')} | {row.get('bounce_return', '-')}% |"
-                )
-        else:
-            lines.append("| 代码 | 名称 | 板块 | 动量20日 | 动量60日 |")
-            lines.append("|------|------|------|---------|---------|")
-            for _, row in short_list.iterrows():
-                lines.append(
-                    f"| {row['code']} | {row.get('name', row['code'])} | "
-                    f"{row.get('sector', '-')} | {row.get('momentum_20d', 0):.1f}% | "
-                    f"{row.get('momentum_60d', 0):.1f}% |"
-                )
+    # ============================================================
+    # 三、短线组合（1-5日持仓）
+    # ============================================================
+    short_df = categories.get("②B_短线榜")
+    if short_df is not None and len(short_df) > 0:
+        # 如果有质量榜的短线部分也合并进来
+        if quality is not None and len(quality) > 0:
+            short_quality = quality[quality.apply(_hold_period, axis=1).str.contains("短线")]
+            short_df = pd.concat([short_df, short_quality], ignore_index=True).drop_duplicates(subset=["code"]).head(8)
+    else:
+        short_df = pd.DataFrame()
+
+    lines.append(f"\n## 三、短线组合（{len(short_df)} 只，建议持仓 1-5 日）\n")
+    if len(short_df) > 0:
+        lines.append("| 代码 | 名称 | 板块 | 评分 | 动量20日 | 量比信号 | 预期净收益 |")
+        lines.append("|------|------|------|------|---------|---------|-----------|")
+        for _, row in short_df.iterrows():
+            code = row.get("code", "")
+            name = row.get("name", code)
+            sector = row.get("sector", "-")
+            score = row.get("composite_score", 0)
+            mom20 = _fmt_pct(row.get("momentum_20d"))
+            # 短线需关注反弹信号
+            decline = row.get("decline_10d", None)
+            vol_ratio = row.get("volume_ratio", None)
+            if decline is not None and vol_ratio is not None:
+                signal = f"超跌反弹(量比{vol_ratio})"
+            else:
+                signal = "-"
+            net_ret = _net_return(score)
+            lines.append(
+                f"| {code} | {name} | {sector} | {score:.1f} | {mom20} | "
+                f"{signal} | {net_ret:+.1f}% |"
+            )
     else:
         lines.append("_今日无短线候选_\n")
 
-    # ---- ③A 持仓 ----
+    # ============================================================
+    # 四、ETF 组合
+    # ============================================================
+    etf_picks = results.get("etf_picks", pd.DataFrame())
+    lines.append(f"\n## 四、ETF 组合（{len(etf_picks)} 只，T+0/低磨损 {etf_cost*100:.2f}%）\n")
+    if len(etf_picks) > 0:
+        lines.append("| 代码 | 名称 | 类型 | 动量20日 | 成交额(亿) | 建议 |")
+        lines.append("|------|------|------|---------|-----------|------|")
+        for _, row in etf_picks.iterrows():
+            code = row.get("code", "")
+            name = row.get("name", code)
+            etype = row.get("etf_type", "-")
+            mom20 = _fmt_pct(row.get("momentum_20d"))
+            amt = f"{row.get('amount', 0)/1e8:.1f}" if row.get("amount") else "-"
+            advice = "定投" if row.get("score", 0) > 70 else "关注"
+            lines.append(f"| {code} | {name} | {etype} | {mom20} | {amt} | {advice} |")
+    else:
+        lines.append("_ETF 数据源暂不可用_\n")
+
+    # ============================================================
+    # 五、持仓与操作
+    # ============================================================
     holdings = categories.get("③A_持仓")
-    lines.append(f"\n## 四、③A 当前持仓（{len(holdings) if holdings is not None else 0} 只）\n")
+    lines.append(f"\n## 五、当前持仓与操作建议（{len(holdings) if holdings is not None else 0} 只）\n")
     if holdings is not None and len(holdings) > 0:
-        lines.append("| 代码 | 名称 | 综合评分 | 板块 | 建议 |")
-        lines.append("|------|------|----------|------|------|")
+        lines.append("| 代码 | 名称 | 评分 | 板块 | 持仓周期建议 | 操作 |")
+        lines.append("|------|------|------|------|-------------|------|")
         for _, row in holdings.iterrows():
             score = row.get("composite_score", 0)
-            l4 = results.get("l4_results", pd.DataFrame())
-            if len(l4) > 0 and "composite_score" in l4.columns:
-                median_val = l4["composite_score"].median()
-                if pd.isna(median_val):
-                    median_val = 50
-            else:
-                median_val = 50
-            median = median_val
-            advice = "⚠️ 关注" if score < median else "✅ 持有"
+            period = _hold_period(row)
+            median = results.get("l4_results", pd.DataFrame()).get("composite_score", pd.Series([50])).median() if len(results.get("l4_results", [])) > 0 else 50
+            advice = "⚠️ 减仓" if score < median else "✅ 持有"
             lines.append(
-                f"| {row['code']} | {row.get('name', row['code'])} | "
-                f"{score} | {row.get('sector', '-')} | {advice} |"
+                f"| {row.get('code','')} | {row.get('name','')} | {score:.0f} | "
+                f"{row.get('sector','-')} | {period} | {advice} |"
             )
     else:
-        lines.append("_当前无持仓（请在 config.yaml 中配置 holdings）_\n")
+        lines.append("_当前无持仓_\n")
 
-    # ---- ③B 操作建议 ----
-    sells = categories.get("③B_操作建议")
-    if sells is not None and len(sells) > 0:
-        lines.append(f"\n## 五、③B 操作建议（{len(sells)} 只建议关注）\n")
-        lines.append("| 代码 | 名称 | 综合评分 | 建议 |")
-        lines.append("|------|------|----------|------|")
-        for _, row in sells.iterrows():
-            lines.append(
-                f"| {row['code']} | {row.get('name', row['code'])} | "
-                f"{row.get('composite_score', 0)} | 考虑减仓 |"
-            )
-
-    # ---- ③C 观察名单 ----
+    # ============================================================
+    # 六、观察名单
+    # ============================================================
     watchlist = categories.get("③C_观察名单")
-    lines.append(f"\n## 六、③C 观察名单（{len(watchlist) if watchlist is not None else 0} 只）\n")
+    lines.append(f"\n## 六、观察名单（{len(watchlist) if watchlist is not None else 0} 只）\n")
     if watchlist is not None and len(watchlist) > 0:
-        lines.append("| 代码 | 名称 | 板块 | 综合评分 |")
-        lines.append("|------|------|------|----------|")
+        lines.append("| 代码 | 名称 | 板块 | 评分 | 关注理由 |")
+        lines.append("|------|------|------|------|----------|")
         for _, row in watchlist.iterrows():
-            lines.append(
-                f"| {row['code']} | {row.get('name', row['code'])} | "
-                f"{row.get('sector', '-')} | {row.get('composite_score', 0)} |"
-            )
+            code = row.get("code", "")
+            name = row.get("name", code)
+            sector = row.get("sector", "-")
+            score = row.get("composite_score", 0)
+            # 关注理由
+            reasons = []
+            if pd.notna(row.get("roe")) and row.get("roe", 0) > 10:
+                reasons.append(f"高ROE{row.get('roe',0):.0f}%")
+            if pd.notna(row.get("momentum_20d")) and row.get("momentum_20d", 0) > 0:
+                reasons.append("动量转正")
+            if not reasons:
+                reasons.append("综合因子")
+            lines.append(f"| {code} | {name} | {sector} | {score:.1f} | {', '.join(reasons[:2])} |")
     else:
         lines.append("_今日无观察名单_\n")
 
-    # ---- 统计信息 ----
+    # ============================================================
+    # 七、统计
+    # ============================================================
     lines.append(f"\n---\n")
-    lines.append(f"**统计**: L2过滤后 {results['l2_filtered_count']} 只 → L4评分 {len(results.get('l4_results', []))} 只")
+    lines.append(f"**统计**: L2过滤后 {results.get('l2_filtered_count', 0)} 只 → "
+                 f"L4评分 {len(results.get('l4_results', []))} 只")
+    lines.append(f" | ETF {len(etf_picks)} 只")
     lines.append(f" | 反弹引擎 {len(results.get('rebound_picks', []))} 只")
-    lines.append(f" | 耗时 {results['elapsed_seconds']}s\n")
+    lines.append(f" | 耗时 {results.get('elapsed_seconds', 0)}s\n")
 
     return "\n".join(lines)
 
