@@ -893,6 +893,13 @@ class MultiFactorEngine:
         from data_enricher import enrich_and_report
         l4_results = enrich_and_report(l4_results)
 
+        # === 风控指标: 止损价 + Kelly仓位 + 板块集中度 + 流动性 ===
+        pos_cap = 0.2  # L0空头默认
+        if isinstance(regime_info, dict):
+            pos_cap = regime_info.get("position_cap", 0.2)
+        from risk_module import enrich_risk_metrics
+        l4_results = enrich_risk_metrics(l4_results, regime_cap=pos_cap)
+
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")
 

@@ -112,8 +112,8 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
     if len(long_term) > 0:
-        lines.append("| 代码 | 名称 | 当日股价 | 一手价格 | 信号 | 技术面(MA/MACD/RSI) | 基本面(ROE/营收) | 评分 |建议入仓| 持有期 | 预期净收益 |")
-        lines.append("|------|------|------|------|------|-------------------|-----------------|------|------|--------|-----------|")
+        lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 基本面 | 评分 |仓位%%| 流动性 | 持有期 | 预期收益 |")
+        lines.append("|------|------|------|------|------|------|--------|--------|------|------|------|--------|-------|")
         for _, row in long_term.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)
@@ -125,6 +125,9 @@ def generate_brief(results: dict, config: dict) -> str:
             close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
             lot_price = close * 100 if pd.notna(close) and close > 0 else 0
             lot_str = f"{lot_price:.0f}" if lot_price > 0 else "-"
+            stop = row.get("stop_loss", 0)
+            stop_str = f"{stop:.2f}" if stop > 0 else "-"
+            liq = row.get("liquidity_tag", "-")
             score = row.get("composite_score", 0)
             # 建议入仓比例 = 仓位上限 × 评分系数
             pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
@@ -136,7 +139,7 @@ def generate_brief(results: dict, config: dict) -> str:
                               if pd.notna(row.get(f)) and row.get(f) != 0)
             prob = min(85, 50 + factor_count * 8 + max(0, (score - 60) * 0.5))
             lines.append(
-                f"| {code} | {name} | {close_str} | {lot_str} | {signal} | {tech} | {fund} | {score:.1f} | {pos_ratio:.1f}% | {period} | {net_ret:+.1f}% |"
+                f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {fund} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {period} | {net_ret:+.1f}% |"
             )
     else:
         lines.append("_当前环境不适合中长线持仓_\n")
@@ -155,8 +158,8 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 三、短线组合（{len(short_df)} 只，建议持仓 1-5 日）\n")
     if len(short_df) > 0:
-        lines.append("| 代码 | 名称 | 当日股价 | 一手价格 | 信号 | 技术面 | 概念 | 概念涨 | 基本面 | 评分 |建议入仓| 动量20日 | 预期净收益 |")
-        lines.append("|------|------|------|------|------|--------|------|--------|--------|------|------|---------|-----------|")
+        lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 概念 | 概念涨 | 评分 |仓位%%| 流动性 | 动量20日 | 预期收益 |")
+        lines.append("|------|------|------|------|------|------|--------|------|--------|------|------|------|---------|-------|")
         for _, row in short_df.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)
@@ -182,7 +185,7 @@ def generate_brief(results: dict, config: dict) -> str:
                 signal = "-"
             net_ret = _net_return(score)
             lines.append(
-                f"| {code} | {name} | {sector} | {concept} | {close_str} | {lot_str} | {score:.1f} | {pos_ratio:.1f}% | {mom20} | {concept_chg} | "
+                f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {concept} | {concept_chg} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {mom20} | "
                 f"{signal} | {net_ret:+.1f}% |"
             )
     else:
