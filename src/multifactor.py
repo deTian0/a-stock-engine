@@ -715,14 +715,8 @@ class MultiFactorEngine:
     def select_etfs(self, top_n: int = 8) -> pd.DataFrame:
         """
         ETF 筛选：从主流行业/宽基 ETF 中按动量+流动性选 Top N。
-        优先使用 tushare 基金数据，回退 akshare。
+        优先 DB 批量查询，回退 CLI。
         """
-        try:
-            etf_list = self.cli.get_stock_list()  # 尝试股票列表中的 ETF
-        except Exception:
-            etf_list = pd.DataFrame()
-
-        # 用知名的 ETF 代码池作为兜底
         well_known_etfs = [
             ("510050", "上证50ETF"), ("510300", "沪深300ETF"),
             ("510500", "中证500ETF"), ("159915", "创业板ETF"),
@@ -731,33 +725,40 @@ class MultiFactorEngine:
             ("512690", "酒ETF"), ("515790", "光伏ETF"),
             ("159995", "芯片ETF"), ("512480", "半导体ETF"),
             ("515050", "5GETF"), ("516510", "云计算ETF"),
-            ("513100", "纳指ETF"), ("159941", "纳指ETF"),
-            ("513050", "中概互联"), ("159605", "中概互联"),
-            ("513330", "恒生互联"), ("159766", "旅游ETF"),
         ]
+
+        # 批量从 DB 获取 ETF 动量
+        codes_only = [c for c, _ in well_known_etfs]
+        db_momentum = self._batch_calc_momentum(codes_only)
 
         picks = []
         for code, name in well_known_etfs:
             try:
-                df = self.price_loader.get_price(code, days=60)
-                if len(df) < 20:
-                    continue
-                close = df["close"].values
-                mom20 = (close[-1] / close[-20] - 1) * 100 if len(close) >= 21 else 0
-                mom60 = (close[-1] / close[-60] - 1) * 100 if len(close) >= 61 else 0
-                amount = df["amount"].tail(5).mean() if "amount" in df.columns else 0
+                # 优先 DB 动量
+                if code in db_momentum:
+                    mom20 = db_momentum[code].get("momentum_20d", 0)
+                    mom60 = db_momentum[code].get("momentum_60d", 0)
+                else:
+                    # 回退 CLI
+                    df = self.price_loader.get_price(code, days=60)
+                    if len(df) < 20:
+                        continue
+                    close = df["close"].values
+                    mom20 = (close[-1] / close[-20] - 1) * 100 if len(close) >= 21 else 0
+                    mom60 = (close[-1] / close[-60] - 1) * 100 if len(close) >= 61 else 0
 
                 # 综合评分: 动量(60%) + 流动性(40%)
-                mom_score = (mom20 * 0.6 + mom60 * 0.4) * 0.6
-                liq_score = min(40, np.log1p(max(amount, 1)) * 2) * 0.4
-                score = mom_score + liq_score
+                mom_score = (mom20 * 0.6 + (0 if not pd.notna(mom60) else mom60) * 0.4) * 0.6
+                if not pd.notna(mom_score):
+                    mom_score = 0
+                score = mom_score + 20  # 基础分+动量分
 
                 picks.append({
                     "code": code, "name": name,
                     "etf_type": "宽基" if code.startswith(("51","58")) else "行业",
-                    "momentum_20d": round(mom20, 2),
-                    "momentum_60d": round(mom60, 2),
-                    "amount": amount,
+                    "momentum_20d": round(mom20, 2) if pd.notna(mom20) else 0,
+                    "momentum_60d": round(mom60, 2) if pd.notna(mom60) else 0,
+                    "amount": 0,
                     "score": round(score + 50, 1),
                 })
             except Exception:

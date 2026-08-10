@@ -40,7 +40,12 @@ def generate_brief(results: dict, config: dict) -> str:
     stock_cost = trade_cfg.get("stock_cost", 0.0013)
     etf_cost = trade_cfg.get("etf_cost", 0.00017)
 
-    def _fmt_pct(val, default="-"):
+    def _fmt_name(row, code):
+        """安全获取名称，空/nan 时用代码代替。"""
+        n = row.get("name", "")
+        if n is None or str(n).lower() in ("nan", "", "none"):
+            return code
+        return n
         """安全格式化百分比。"""
         if val is None or not pd.notna(val):
             return default
@@ -108,7 +113,7 @@ def generate_brief(results: dict, config: dict) -> str:
         lines.append("|------|------|------|------|--------|-----------|----------|")
         for _, row in long_term.iterrows():
             code = row.get("code", "")
-            name = row.get("name", code)
+            name = _fmt_name(row, code)
             sector = row.get("sector", "-")
             score = row.get("composite_score", 0)
             period = _hold_period(row)
@@ -142,7 +147,7 @@ def generate_brief(results: dict, config: dict) -> str:
         lines.append("|------|------|------|------|---------|---------|-----------|")
         for _, row in short_df.iterrows():
             code = row.get("code", "")
-            name = row.get("name", code)
+            name = _fmt_name(row, code)
             sector = row.get("sector", "-")
             score = row.get("composite_score", 0)
             mom20 = _fmt_pct(row.get("momentum_20d"))
@@ -171,7 +176,7 @@ def generate_brief(results: dict, config: dict) -> str:
         lines.append("|------|------|------|---------|-----------|------|")
         for _, row in etf_picks.iterrows():
             code = row.get("code", "")
-            name = row.get("name", code)
+            name = _fmt_name(row, code)
             etype = row.get("etf_type", "-")
             mom20 = _fmt_pct(row.get("momentum_20d"))
             amt = f"{row.get('amount', 0)/1e8:.1f}" if row.get("amount") else "-"
@@ -210,7 +215,7 @@ def generate_brief(results: dict, config: dict) -> str:
         lines.append("|------|------|------|------|----------|")
         for _, row in watchlist.iterrows():
             code = row.get("code", "")
-            name = row.get("name", code)
+            name = _fmt_name(row, code)
             sector = row.get("sector", "-")
             score = row.get("composite_score", 0)
             # 关注理由
