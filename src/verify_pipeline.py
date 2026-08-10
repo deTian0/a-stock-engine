@@ -187,7 +187,7 @@ def test_8_full_chain():
         from multifactor import MultiFactorEngine
         import yaml
         config_path = Path(__file__).parent.parent / "config/config.yaml"
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
         
         engine = MultiFactorEngine(config_dict=config)
