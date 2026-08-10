@@ -112,6 +112,9 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
 
     # 按行业聚合: 平均涨幅、总成交额
     if len(stock_list) > 0 and "code" in stock_list.columns:
+        # 排除北交所
+        codes = stock_list["code"].astype(str).str.zfill(6)
+        stock_list = stock_list[codes.str.startswith(("0","1","3","5","6"))]
         # 注入 westock-data 实时涨跌幅（tushare 不含 change_pct）
         if "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all():
             sample_codes = stock_list["code"].astype(str).str.zfill(6).tolist()

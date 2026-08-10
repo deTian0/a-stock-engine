@@ -207,6 +207,11 @@ class MultiFactorEngine:
                 if col in df.columns:
                     df = df[df[col].astype(str).str.contains("正常|交易|1", na=False)]
 
+        # 排除北交所（只保留沪深+基金）
+        if "code" in df.columns:
+            codes = df["code"].astype(str).str.zfill(6)
+            df = df[codes.str.startswith(("0", "1", "3", "5", "6"))]
+
         # 排除新股（上市不足N天）
         if cfg.get("exclude_new", True) and "list_date" in df.columns:
             min_date = datetime.now() - timedelta(days=60)
