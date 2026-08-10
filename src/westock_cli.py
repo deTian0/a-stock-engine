@@ -44,7 +44,9 @@ def _kill_process_tree(pid: int) -> None:
         logger.warning(f"终止进程 {pid} 时出错: {e}")
 
 
-WESTOCK_CLI_CMD = ["npx", "-y", "westock-data-skillhub@1.0.5"]
+from sys_config import get_encoding, get_npx_path
+_ENCODING = get_encoding()
+WESTOCK_CLI_CMD = [get_npx_path(), "-y", "westock-data-skillhub@1.0.5"]
 
 
 def _to_ws_code(code: str) -> str:
@@ -91,7 +93,7 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                encoding="utf-8",
+                encoding=_ENCODING,
             )
             stdout, stderr = proc.communicate(timeout=timeout)
 
@@ -195,7 +197,7 @@ class WestockCLI:
             logger.debug(f"缓存过期: {key}")
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding=_ENCODING))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"读取缓存失败 {key}: {e}")
             return None
@@ -203,7 +205,7 @@ class WestockCLI:
     def _write_cache(self, key: str, data: dict) -> None:
         path = self._cache_path(key)
         try:
-            path.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+            path.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding=_ENCODING)
         except OSError as e:
             logger.warning(f"写入缓存失败 {key}: {e}")
 

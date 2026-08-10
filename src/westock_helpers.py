@@ -9,16 +9,12 @@ import logging
 from pathlib import Path
 from collections import defaultdict
 
-logger = logging.getLogger(__name__)
+from sys_config import get_encoding, get_npx_path
 
-# WorkBuddy 管理的 Node.js 路径
-_NODE_DIR = Path.home() / ".workbuddy" / "binaries" / "node" / "versions" / "22.22.2"
-if (_NODE_DIR / "npx.cmd").exists():
-    _NPX = str(_NODE_DIR / "npx.cmd")
-elif (_NODE_DIR / "npx").exists():
-    _NPX = str(_NODE_DIR / "npx")
-else:
-    _NPX = "npx"
+logger = logging.getLogger(__name__)
+_NPX = get_npx_path()
+_ENCODING = get_encoding()
+
 
 
 def _to_ws(code: str) -> str:
@@ -46,7 +42,7 @@ def batch_kline(codes: list[str], limit: int = 2) -> dict[str, list[float]]:
                 [_NPX, "-y", "westock-data-skillhub@1.0.5",
                  "kline", ws_codes, "--period", "day", "--limit", str(limit)],
                 capture_output=True, text=True, timeout=60,
-                encoding="utf-8", errors="replace"
+                encoding=_ENCODING, errors="replace"
             )
             if r.returncode != 0:
                 logger.warning(f"westock kline 返回码 {r.returncode}: {r.stderr[:120]}")
