@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import json
 from datetime import datetime
+from risk_module import allocate_basket
 
 
 def generate_html(results: dict, config: dict) -> str:
@@ -26,6 +27,17 @@ def generate_html(results: dict, config: dict) -> str:
 
     regime_name = regime.get("regime", "未知") if isinstance(regime, dict) else str(regime)
     pos_cap = regime.get("position_cap", 0.5) if isinstance(regime, dict) else 0.5
+
+    # 篮子分配: 中长线仓位改为占总资金比例 (修复单票按 position_cap 满算)
+    brief_cfg = config.get("brief", {}) if isinstance(config, dict) else {}
+    sleeve_weights = brief_cfg.get("sleeve_weights", {"quality": 0.50, "short_term": 0.30, "etf": 0.20})
+    alloc_method = brief_cfg.get("method", "score_weighted")
+    max_single = brief_cfg.get("max_single_position", 0.08)
+    q_view = quality.head(8) if len(quality) > 0 else quality
+    q_scores = q_view["composite_score"].tolist() if "composite_score" in q_view.columns else []
+    q_budget = pos_cap * sleeve_weights.get("quality", 0.50)
+    q_alloc = allocate_basket(q_scores, q_budget, method=alloc_method, max_single=max_single)
+    q_pos_map = {c: a for c, a in zip(q_view["code"].tolist(), q_alloc)} if "code" in q_view.columns else {}
 
     # === ECharts 数据 ===
     # 评分分布
@@ -140,7 +152,7 @@ tr:hover{{background:#f5f7fa}}
             tech = f"{r.get('tech_ma','-')}|{r.get('tech_macd','-')}"
             fund = f"ROE:{_fmt_val(r.get('roe'),pct=True)}"
             score = r.get("composite_score", 0)
-            pos = f"{r.get('suggested_position',0):.1f}%"
+            pos = f"{q_pos_map.get(r.get('code', ''), 0) * 100:.1f}%"
             liq = r.get("liquidity_tag", "-")
             html += f'<tr><td style="font-size:16px">{grade}</td><td>{code}</td><td>{name}</td><td>{close}</td><td class="bearish">{stop}</td>'
             html += f'<td class="{sig_cls}">{sig}</td><td style="font-size:11px">{tech}</td><td style="font-size:11px">{fund}</td>'

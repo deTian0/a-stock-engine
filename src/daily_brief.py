@@ -24,6 +24,7 @@ from multifactor import MultiFactorEngine
 from database import get_db
 from guard import setup_protection, teardown_protection, setup_logging
 from pick_tracker import track_picks
+from risk_module import allocate_basket
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,13 @@ def generate_brief(results: dict, config: dict) -> str:
     trade_cfg = config.get("trade", {})
     stock_cost = trade_cfg.get("stock_cost", 0.0013)
     etf_cost = trade_cfg.get("etf_cost", 0.00017)
+
+    # 篮子仓位分配配置
+    brief_cfg = config.get("brief", {})
+    sleeve_weights = brief_cfg.get(
+        "sleeve_weights", {"quality": 0.50, "short_term": 0.30, "etf": 0.20})
+    alloc_method = brief_cfg.get("method", "score_weighted")
+    max_single = brief_cfg.get("max_single_position", 0.08)
 
     def _fmt_name(row, code):
         """安全获取名称，空/nan 时用代码代替。"""
@@ -146,6 +154,14 @@ def generate_brief(results: dict, config: dict) -> str:
     # ============================================================
     # 二、中长线组合（5-20日持仓）
     # ============================================================
+    # 篮子分配: 中长线篮子预算 = 仓位上限 × quality 权重, 按评分加权到各票
+    quality_scores = long_term["composite_score"].tolist() if len(long_term) > 0 else []
+    quality_codes = long_term["code"].tolist() if len(long_term) > 0 else []
+    quality_budget = pos_cap * sleeve_weights.get("quality", 0.50)
+    quality_alloc = allocate_basket(quality_scores, quality_budget,
+                                    method=alloc_method, max_single=max_single)
+    quality_pos_map = {c: a for c, a in zip(quality_codes, quality_alloc)}
+
     lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
     if len(long_term) > 0:
         lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 基本面 | 评分 |仓位%%| 流动性 | 持有期 | 预期收益 |")
@@ -193,9 +209,8 @@ def generate_brief(results: dict, config: dict) -> str:
                 fund_parts.append(f"营收{rev_g:+.1f}%")
             fund = "/".join(fund_parts) if fund_parts else "-"
             score = row.get("composite_score", 0)
-            # 建议入仓比例 = 仓位上限 × 评分系数
-            pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
-            pos_ratio = round(pos_cap * 100 * (score / 100), 1) if score > 0 else 0
+            # 篮子仓位: 该票占「总资金」比例 (来自中长线篮子分配)
+            pos_ratio = round(quality_pos_map.get(code, 0) * 100, 2)
             period = _hold_period(row)
             net_ret = _net_return(score)
             # 获利概率: 基于因子质量的粗略估计
@@ -220,6 +235,14 @@ def generate_brief(results: dict, config: dict) -> str:
     else:
         short_df = pd.DataFrame()
 
+    # 篮子分配: 短线篮子预算 = 仓位上限 × short_term 权重, 按评分加权到各票
+    short_scores = short_df["composite_score"].tolist() if len(short_df) > 0 else []
+    short_codes = short_df["code"].tolist() if len(short_df) > 0 else []
+    short_budget = pos_cap * sleeve_weights.get("short_term", 0.30)
+    short_alloc = allocate_basket(short_scores, short_budget,
+                                  method=alloc_method, max_single=max_single)
+    short_pos_map = {c: a for c, a in zip(short_codes, short_alloc)}
+
     lines.append(f"\n## 三、短线组合（{len(short_df)} 只，建议持仓 1-5 日）\n")
     if len(short_df) > 0:
         lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 概念 | 概念涨 | 评分 |仓位%%| 流动性 | 动量20日 | 预期收益 |")
@@ -239,8 +262,8 @@ def generate_brief(results: dict, config: dict) -> str:
             stop_str = f"{stop:.2f}" if stop > 0 else "-"
             liq = row.get("liquidity_tag", "-")
             score = row.get("composite_score", 0)
-            pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
-            pos_ratio = round(pos_cap * 100 * (score / 100), 1) if score > 0 else 0
+            # 篮子仓位: 该票占「总资金」比例 (来自短线篮子分配)
+            pos_ratio = round(short_pos_map.get(code, 0) * 100, 2)
             mom20 = _fmt_pct(row.get("momentum_20d"))
             concept_chg = _fmt_pct(row.get("concept_chg"))
             # 短线需关注反弹信号
@@ -268,6 +291,16 @@ def generate_brief(results: dict, config: dict) -> str:
             )
     else:
         lines.append("_今日无短线候选_\n")
+
+    # 篮子仓位说明 (修复: 单只不再按 position_cap 满算)
+    lines.append(
+        f"\n> 🧺 **篮子仓位说明**: 表中「仓位%」= 该票占**总资金**的比例, 不是单票满仓。"
+        f"环境上限 {pos_cap:.0%} 切分为 中长线×{sleeve_weights.get('quality',0.5):.0%} "
+        f"+ 短线×{sleeve_weights.get('short_term',0.3):.0%} + ETF×{sleeve_weights.get('etf',0.2):.0%} "
+        f"(权重和=1, 合计=上限)。同一篮子内按评分加权分配, 单只≤总资金{max_single:.0%}。"
+        f"本表短线 {len(short_df)} 只合计 ≈ {short_budget:.1%}（占总资金）, "
+        f"中长线 {len(long_term)} 只合计 ≈ {quality_budget:.1%}。"
+    )
 
     # ============================================================
     # 四、ETF 组合
