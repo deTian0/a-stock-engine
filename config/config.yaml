@@ -4,7 +4,7 @@
 
 # --- 系统配置 ---
 system:
-  encoding: "utf-8"                # 子进程输出编码 (Win11=utf-8, Win10=gbk)
+  encoding: "utf-8"                # westock-data/npx子进程输出的编码（固定UTF-8，无需改）
   npx_path: "npx.cmd"             # npx 命令路径 (可配绝对路径)
 
 # --- 账户配置 ---
