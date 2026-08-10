@@ -760,18 +760,26 @@ def main():
 
         content, review_data = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
 
-        # 保存 Markdown（保持原路径与向后兼容）
+        # 保存 Markdown（按日期分目录；带分钟时间戳归档 + 固定名指针双写）
         today = datetime.now().strftime("%Y-%m-%d")
         save_dir = Path("history") / today
         save_dir.mkdir(parents=True, exist_ok=True)
 
+        ts = datetime.now().strftime("%H%M")
+        # 1) 带分钟时间戳的归档文件（唯一，多次运行不覆盖）
+        md_ts = save_dir / f"盘后复盘报告_{ts}.md"
+        md_ts.write_text(content, encoding="utf-8")
+        logger.info(f"复盘报告已归档(带时间戳): {md_ts}")
+        # 2) 固定名指针文件（始终=最新一次，向后兼容）
         md_path = save_dir / "盘后复盘报告.md"
         md_path.write_text(content, encoding="utf-8")
-        logger.info(f"复盘报告已保存: {md_path}")
 
-        # 保存 HTML（新增，便于阅读）
+        # 保存 HTML（新增，便于阅读；归档 + 指针双写）
         try:
             html = generate_review_html(review_data)
+            html_ts = save_dir / f"盘后复盘报告_{ts}.html"
+            html_ts.write_text(html, encoding="utf-8")
+            logger.info(f"复盘HTML已归档(带时间戳): {html_ts}")
             html_path = save_dir / "盘后复盘报告.html"
             html_path.write_text(html, encoding="utf-8")
             logger.info(f"复盘HTML已保存: {html_path}")

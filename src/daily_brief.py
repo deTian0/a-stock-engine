@@ -431,10 +431,16 @@ def generate_brief(results: dict, config: dict) -> str:
 
 
 def save_brief(content: str, config: dict) -> Path:
-    """保存简报到文件（按日期分目录存档）。"""
+    """保存简报到文件（按日期分目录存档，带分钟时间戳避免同日多次运行覆盖）。
+
+    双写策略：
+      - 归档文件：<基名>_<HHMM>.<ext>（每次运行唯一，测试阶段多次运行不丢失）
+      - 指针文件：<基名>.<ext>（固定名，永远=最新一次，供 verify_picks / 日常查看）
+    """
     out_cfg = config["output"]
     brief_dir = Path(out_cfg["brief_dir"])
     filename = out_cfg["brief_filename"]
+    base, ext = Path(filename).stem, Path(filename).suffix
 
     if out_cfg.get("date_based_archive", True):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -443,10 +449,18 @@ def save_brief(content: str, config: dict) -> Path:
         save_dir = brief_dir
 
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_path = save_dir / filename
-    save_path.write_text(content, encoding="utf-8")
-    logger.info(f"简报已保存: {save_path}")
-    return save_path
+
+    # 1) 带分钟时间戳的归档文件（唯一，不会被覆盖）
+    ts = datetime.now().strftime("%H%M")
+    ts_path = save_dir / f"{base}_{ts}{ext}"
+    ts_path.write_text(content, encoding="utf-8")
+    logger.info(f"简报已归档(带时间戳): {ts_path}")
+
+    # 2) 固定名指针文件（始终=最新一次，供下游/日常查看；会被覆盖，属预期）
+    pointer_path = save_dir / filename
+    pointer_path.write_text(content, encoding="utf-8")
+
+    return ts_path
 
 
 def main():
@@ -513,13 +527,19 @@ def main():
         print(f"\n{'='*60}")
         print(f"盘前选股简报已生成: {brief_path}")
 
-        # 生成 HTML 版本
+        # 生成 HTML 版本（归档 + 指针双写，与 Markdown 一致）
         try:
             from html_report import generate_html
             html_content = generate_html(results, config)
-            html_path = Path(str(brief_path).replace(".md", ".html"))
-            html_path.write_text(html_content, encoding="utf-8")
-            print(f"HTML 简报已生成: {html_path}")
+            # 时间戳归档 HTML（唯一，不覆盖）
+            html_ts = Path(str(brief_path).replace(".md", ".html"))
+            html_ts.write_text(html_content, encoding="utf-8")
+            # 固定名指针 HTML（最新一次）
+            pointer_name = Path(config["output"]["brief_filename"]).with_suffix(".html").name
+            html_pointer = brief_path.parent / pointer_name
+            html_pointer.write_text(html_content, encoding="utf-8")
+            print(f"HTML 简报已生成: {html_ts}")
+            print(f"HTML 指针已更新: {html_pointer}")
         except Exception as e:
             logger.warning(f"HTML 简报生成失败: {e}")
         print(f"市场环境: {results['regime']['regime']} (仓位上限 {results['regime']['position_cap']:.0%})")
