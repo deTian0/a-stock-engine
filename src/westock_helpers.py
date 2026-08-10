@@ -45,7 +45,8 @@ def batch_kline(codes: list[str], limit: int = 2) -> dict[str, list[float]]:
             r = subprocess.run(
                 [_NPX, "-y", "westock-data-skillhub@1.0.5",
                  "kline", ws_codes, "--period", "day", "--limit", str(limit)],
-                capture_output=True, text=True, timeout=60
+                capture_output=True, text=True, timeout=60,
+                encoding="utf-8", errors="replace"
             )
             if r.returncode != 0:
                 logger.warning(f"westock kline 返回码 {r.returncode}: {r.stderr[:120]}")

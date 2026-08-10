@@ -91,6 +91,7 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
             )
             stdout, stderr = proc.communicate(timeout=timeout)
 
@@ -222,16 +223,109 @@ class WestockCLI:
     # ---- 数据接口 ----
 
     def get_stock_list(self) -> pd.DataFrame:
-        """获取全A股股票列表。westock-data 不直接支持全量查询，跳过直接回退 tushare。"""
-        # westock-data 不支持全量股票列表，直接用 tushare
+        """获取全A股股票列表。优先 tushare，回退 akshare，最终回退 westock-data 指数成份股。"""
         if self._ts:
             try:
                 return self._ts.get_stock_list()
             except Exception as e2:
                 logger.info(f"tushare 股票列表失败: {e2}，回退 akshare")
         if self._ak:
-            return self._ak.get_stock_list()
-        raise RuntimeError("无可用的股票列表数据源")
+            try:
+                return self._ak.get_stock_list()
+            except Exception as e3:
+                logger.info(f"akshare 股票列表失败: {e3}，回退 westock-data 指数成份股")
+        return self._get_stock_list_westock()
+
+    def _get_stock_list_westock(self) -> pd.DataFrame:
+        """westock-data 回退：通过指数成份股 + 批量 K 线构建股票列表。"""
+        indices = ["sh000300", "sh000905"]  # 沪深300 + 中证500 ≈ 800 只
+        all_codes = {}  # code → name
+
+        for idx in indices:
+            try:
+                output = run_westock(
+                    ["index", "constituent", idx],
+                    timeout=30, max_retries=1
+                )
+                rows = _parse_pipe_table(output)
+                for row in rows:
+                    raw_code = row.get("code", "")
+                    code = raw_code.replace("sh", "").replace("sz", "").replace("bj", "").zfill(6)
+                    if code not in all_codes:
+                        all_codes[code] = row.get("name", code)
+            except Exception as e:
+                logger.debug(f"westock-data 指数成份股 {idx} 失败: {e}")
+
+        if not all_codes:
+            logger.warning("westock-data 指数成份股为空，无法构建股票列表")
+            return pd.DataFrame()
+
+        # 批量获取 K 线（limit=2 拿今日+昨日，计算量比）
+        codes_list = list(all_codes.keys())
+        all_kline = []
+        batch_size = 80  # CPU-safe: 小批次顺序执行
+        for i in range(0, len(codes_list), batch_size):
+            batch = codes_list[i:i + batch_size]
+            ws_codes = ",".join(_to_ws_code(c) for c in batch)
+            try:
+                output = run_westock(
+                    ["kline", ws_codes, "--period", "day", "--limit", "2"],
+                    timeout=90, max_retries=2
+                )
+                lines = output.strip().split("\n")
+                today_data = {}
+                prev_vol_data = {}
+                for line in lines:
+                    if not line or "|" not in line or "[Batch]" in line or "symbol" in line:
+                        continue
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) < 10:
+                        continue
+                    symbol = parts[1].replace("sh", "").replace("sz", "").replace("bj", "").zfill(6)
+                    try:
+                        close_p = float(parts[4])
+                        high_p = float(parts[5])
+                        low_p = float(parts[6])
+                        volume = float(parts[7])
+                        amount = float(parts[8])
+                        exchange = float(parts[9])
+                    except (ValueError, IndexError):
+                        continue
+                    if symbol not in today_data:
+                        today_data[symbol] = {
+                            "close": close_p, "high": high_p, "low": low_p,
+                            "volume": volume, "amount": amount, "change_pct": exchange
+                        }
+                    elif symbol not in prev_vol_data:
+                        prev_vol_data[symbol] = volume
+
+                for code, data in today_data.items():
+                    prev_vol = prev_vol_data.get(code, data["volume"])
+                    vol_ratio = data["volume"] / prev_vol if prev_vol > 0 else 1.0
+                    amp = ((data["high"] - data["low"]) / data["close"] * 100
+                           if data["close"] > 0 else 0)
+                    all_kline.append({
+                        "code": code,
+                        "close": data["close"],
+                        "change_pct": data["change_pct"],
+                        "volume": data["volume"],
+                        "amount": data["amount"],
+                        "volume_ratio": round(vol_ratio, 2),
+                        "amplitude": round(amp, 2),
+                    })
+            except Exception as e:
+                logger.debug(f"westock-data K 线批次 {i}-{i+batch_size} 失败: {e}")
+            time.sleep(0.5)  # CPU-safe
+
+        if not all_kline:
+            logger.warning("westock-data K 线数据为空")
+            return pd.DataFrame()
+
+        kdf = pd.DataFrame(all_kline)
+        named = pd.DataFrame([{"code": c, "name": n} for c, n in all_codes.items()])
+        df = named.merge(kdf, on="code", how="left")
+        logger.info(f"westock-data 指数成份股: {len(df)} 只 (K线覆盖 {kdf['change_pct'].notna().sum()})")
+        return df
 
     def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> pd.DataFrame:
         """获取个股K线数据。优先 westock-data，失败回退 tushare → akshare。"""
@@ -330,16 +424,48 @@ class WestockCLI:
                 return self._ak.get_fundamentals(codes)
             return pd.DataFrame()
 
-    def get_sector_mapping(self) -> dict[str, str]:
-        """获取板块映射。westock-data profile 单股返回 industry，不适合全量查询 → 直接回退 tushare。"""
+    def get_sector_mapping(self, codes: list[str] = None) -> dict[str, str]:
+        """获取板块映射。优先 tushare，回退 akshare，最终回退 westock-data profile。"""
         if self._ts:
             try:
                 return self._ts.get_sector_mapping()
             except Exception as e2:
                 logger.info(f"tushare 板块映射失败: {e2}，回退 akshare")
         if self._ak:
-            return self._ak.get_sector_mapping()
+            try:
+                return self._ak.get_sector_mapping()
+            except Exception as e3:
+                logger.info(f"akshare 板块映射失败: {e3}，回退 westock-data profile")
+        if codes:
+            return self._get_sector_mapping_from_profile(codes)
         return {}
+
+    def _get_sector_mapping_from_profile(self, codes: list[str]) -> dict[str, str]:
+        """通过 westock-data profile 批量获取行业映射（max 30 只/批，CPU-safe）。"""
+        if not codes:
+            return {}
+        mapping = {}
+        batch_size = 30
+        for i in range(0, len(codes), batch_size):
+            batch = codes[i:i + batch_size]
+            ws_codes = ",".join(_to_ws_code(c) for c in batch)
+            try:
+                output = run_westock(
+                    ["profile", ws_codes],
+                    timeout=30, max_retries=1
+                )
+                rows = _parse_pipe_table(output)
+                for row in rows:
+                    raw_code = row.get("code", "")
+                    code = raw_code.replace("sh", "").replace("sz", "").replace("bj", "").zfill(6)
+                    industry = row.get("industry", "")
+                    if industry:
+                        mapping[code] = industry
+            except Exception as e:
+                logger.debug(f"westock-data profile 批次 {i} 失败: {e}")
+            time.sleep(0.3)  # CPU-safe
+        logger.info(f"westock-data profile 板块映射: {len(mapping)} 只")
+        return mapping
 
     def get_sector_list(self) -> pd.DataFrame:
         """获取板块行情列表。westock-data 不直接支持 → 回退 tushare。"""

@@ -185,9 +185,13 @@ def enrich_and_report(l4_results: pd.DataFrame) -> pd.DataFrame:
     result = enrich_l4_results(l4_results)
     # 信号强度评级
     result["signal_grade"] = result.apply(grade_signal, axis=1)
+    # 确保所有列都存在（补全失败也不崩）
+    for col in ["close", "concept_name", "concept_chg", "tech_signal", "tech_ma", "tech_macd", "tech_rsi"]:
+        if col not in result.columns:
+            result[col] = "-"
     after = {
         "name": result["name"].notna().sum(),
-        "close": result["close"].notna().sum(),
+        "close": result["close"].notna().sum() if "close" in result.columns else 0,
         "concept": result["concept_name"].notna().sum() if "concept_name" in result.columns else 0,
         "tech": (result["tech_signal"].notna().sum() if "tech_signal" in result.columns else 0),
     }
