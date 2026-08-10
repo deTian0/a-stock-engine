@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from westock_cli import get_cli
 from database import get_db
 from local_price_loader import LocalPriceLoader
-from pick_tracker import get_tracking_report, track_picks
+from pick_tracker import get_tracking_report, get_tracking_summary, track_picks
 
 logger = logging.getLogger(__name__)
 
@@ -224,43 +224,44 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
         lines.append(f"_验证数据获取失败: {e}_\n")
 
     # ============================================================
-    # 4. 策略优化建议
+    # 4. 选股命中统计（两周周期追踪 + 累计命中）
     # ============================================================
-    lines.append("\n## 四、策略优化建议\n")
+    lines.append("\n## 四、选股命中统计\n")
     try:
-        db = get_db()
-        t2_stats = db.get_t2_stats(days=30)
-        if t2_stats.get("count", 0) > 0:
-            lines.append(f"- 近30日 T+2 胜率: **{t2_stats['win_rate']}%** ({t2_stats['positive']}/{t2_stats['count']})")
-            lines.append(f"- 平均收益率: **{t2_stats['avg_return']}%**, 中位数: {t2_stats['median_return']}%")
-            lines.append(f"- 最大收益: {t2_stats['max_return']}%, 最小: {t2_stats['min_return']}%")
-            if t2_stats['win_rate'] < 45:
-                lines.append("- ⚠️ 胜率偏低，建议收紧因子阈值或增加基本面权重")
-            elif t2_stats['win_rate'] > 60:
-                lines.append("- ✅ 策略表现良好，可考虑适度加仓")
-    except Exception as e:
-        logger.warning(f"策略分析失败: {e}")
+        summary = get_tracking_summary("pre_market")
+        if len(summary) > 0:
+            # 总览
+            total_cycles = summary["total_cycles"].sum() if "total_cycles" in summary.columns else 0
+            total_cum = summary["cumulative_hits"].sum() if "cumulative_hits" in summary.columns else 0
+            active_cyc = summary[summary["active_cycle_end"] >= datetime.now().strftime("%Y-%m-%d")] if "active_cycle_end" in summary.columns else pd.DataFrame()
+            lines.append(f"- 累计追踪: {len(summary)} 只股票, {total_cum} 次命中, {total_cycles} 个周期")
+            lines.append(f"- 活跃周期: {len(active_cyc)} 只正在追踪中")
+            if len(active_cyc) > 0 and "active_cycle_hits" in active_cyc.columns:
+                multi_hit = active_cyc[active_cyc["active_cycle_hits"] >= 2]
+                if len(multi_hit) > 0:
+                    lines.append(f"- 周期内多次命中: {len(multi_hit)} 只 (高频信号)")
+                    lines.append(f"  高频股票: {', '.join(multi_hit['code'].head(5).tolist())}")
 
-    # 因子有效性
-    try:
-        db = get_db()
-        corrs = db.get_factor_effectiveness(days=60)
-        if corrs:
-            lines.append("\n### 因子有效性（近60日与T+2收益的相关性）\n")
-            valid = {k: v for k, v in corrs.items() if v is not None}
-            sorted_corrs = sorted(valid.items(), key=lambda x: abs(x[1]), reverse=True)
-            lines.append("| 因子 | 相关性 | 建议 |")
-            lines.append("|------|--------|------|")
-            for factor, corr in sorted_corrs[:8]:
-                bar = "🟢" if abs(corr) > 0.1 else ("🟡" if abs(corr) > 0.05 else "⚪")
-                suggestion = "权重不变"
-                if corr > 0.1:
-                    suggestion = "可增加权重"
-                elif corr < -0.1:
-                    suggestion = "考虑降低权重"
-                lines.append(f"| {factor} | {bar} {corr:.3f} | {suggestion} |")
+            # 盘前累计Top5
+            pre = get_tracking_summary("pre_market")
+            post = get_tracking_summary("post_market")
+            if len(pre) > 0:
+                lines.append("\n### 盘前累计命中 Top 5\n")
+                lines.append("| 代码 | 累计命中 | 周期数 | 当前周期内 | 最近命中 |")
+                lines.append("|------|----------|--------|-----------|----------|")
+                for _, r in pre.head(5).iterrows():
+                    lines.append(f"| {r['code']} | {r['cumulative_hits']} | {r['total_cycles']} | {r['active_cycle_hits']} | {r['last_pick_date']} |")
+            if len(post) > 0:
+                lines.append("\n### 盘后累计命中 Top 5\n")
+                lines.append("| 代码 | 累计命中 | 最近命中 |")
+                lines.append("|------|----------|----------|")
+                for _, r in post.head(5).iterrows():
+                    lines.append(f"| {r['code']} | {r['cumulative_hits']} | {r['last_pick_date']} |")
+        else:
+            lines.append("_暂无命中追踪数据_\n")
     except Exception as e:
-        logger.warning(f"因子分析失败: {e}")
+        logger.warning(f"命中统计失败: {e}")
+        lines.append("_统计数据暂不可用_\n")
 
     lines.append(f"\n---\n")
     lines.append(f"*自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
@@ -407,73 +408,6 @@ def main():
         preloaded_prices = _batch_preload_prices(codes_for_prices, config, price_loader)
 
         content = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
-
-        # T+2 验证: 找到≥2个自然日前选股且未验证的，用kline取T+0/T+2收盘价算收益
-        try:
-            db = get_db()
-            today = datetime.now().strftime("%Y-%m-%d")
-            # 找所有≥2天前的选股、且尚未在t2_verifications中
-            rows = db.conn.execute("""
-                SELECT DISTINCT s.code, DATE(s.pick_date) as pd
-                FROM stock_picks s
-                WHERE DATE(s.pick_date) <= DATE('now', '-2 days')
-                AND NOT EXISTS (
-                    SELECT 1 FROM t2_verifications v
-                    WHERE v.code = s.code AND v.pick_date = DATE(s.pick_date)
-                )
-                LIMIT 50
-            """).fetchall()
-
-            if rows:
-                from collections import defaultdict
-                by_pick_date = defaultdict(list)
-                for r in rows:
-                    by_pick_date[r["pd"]].append(r["code"].zfill(6))
-
-                import subprocess
-                for pick_date, codes in by_pick_date.items():
-                    # 计算从pick_date到今天的天数
-                    delta = (datetime.now() - datetime.strptime(pick_date, "%Y-%m-%d")).days + 2
-                    ws_codes = ",".join(f"sh{c}" if c.startswith(("6","9")) else f"sz{c}" for c in codes)
-                    r = subprocess.run(
-                        f"npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit {delta}",
-                        capture_output=True, text=True, timeout=60, shell=True
-                    )
-                    if r.returncode != 0 or not r.stdout:
-                        continue
-
-                    # 解析: kline[0]=最新(today), kline[-1]=最旧(T+0)
-                    by_code = defaultdict(list)
-                    for line in r.stdout.strip().split("\n"):
-                        if "|" not in line or "symbol" in line or "Batch" in line:
-                            continue
-                        parts = [p.strip() for p in line.split("|")]
-                        if len(parts) < 6:
-                            continue
-                        sym = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
-                        try:
-                            by_code[sym].append(float(parts[4]))
-                        except ValueError:
-                            pass
-
-                    verifications = []
-                    for code in codes:
-                        chain = by_code.get(code, [])
-                        if len(chain) >= 2:
-                            t2_close = chain[0]    # 今天收盘
-                            t0_close = chain[-1]   # 最早(≈pick_date当天收盘)
-                            ret = round((t2_close / t0_close - 1) * 100, 2) if t0_close > 0 else 0
-                            status = "positive" if ret > 0 else "negative" if ret < 0 else "flat"
-                            verifications.append({
-                                "code": code, "name": code,
-                                "t0_close": t0_close, "t2_close": t2_close,
-                                "return_pct": ret, "status": status,
-                            })
-                    if verifications:
-                        db.save_t2_verification(pick_date=pick_date, verifications=verifications)
-                        logger.info(f"T+2验证入库: {pick_date} {len(verifications)}条")
-        except Exception as e:
-            logger.debug(f"T+2验证跳过: {e}")
 
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")

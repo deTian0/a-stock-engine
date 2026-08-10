@@ -112,8 +112,8 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
     if len(long_term) > 0:
-        lines.append("| 代码 | 名称 | 板块 | 概念 | 当日股价 | 一手价格 | 评分 | 持有期 | 预期净收益 | 获利概率 |")
-        lines.append("|------|------|------|------|------|------|------|--------|-----------|----------|")
+        lines.append("| 代码 | 名称 | 板块 | 概念 | 当日股价 | 一手价格 | 评分 |建议入仓比例| 持有期 | 预期净收益 | 获利概率 |")
+        lines.append("|------|------|------|------|------|------|------|------|--------|-----------|----------|")
         for _, row in long_term.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)
@@ -125,10 +125,10 @@ def generate_brief(results: dict, config: dict) -> str:
             close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
             lot_price = close * 100 if pd.notna(close) and close > 0 else 0
             lot_str = f"{lot_price:.0f}" if lot_price > 0 else "-"
+            score = row.get("composite_score", 0)
             # 建议入仓比例 = 仓位上限 × 评分系数
             pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
             pos_ratio = round(pos_cap * 100 * (score / 100), 1) if score > 0 else 0
-            score = row.get("composite_score", 0)
             period = _hold_period(row)
             net_ret = _net_return(score)
             # 获利概率: 基于因子质量的粗略估计
@@ -169,9 +169,9 @@ def generate_brief(results: dict, config: dict) -> str:
             close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
             lot_price = close * 100 if pd.notna(close) and close > 0 else 0
             lot_str = f"{lot_price:.0f}" if lot_price > 0 else "-"
+            score = row.get("composite_score", 0)
             pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
             pos_ratio = round(pos_cap * 100 * (score / 100), 1) if score > 0 else 0
-            score = row.get("composite_score", 0)
             mom20 = _fmt_pct(row.get("momentum_20d"))
             concept_chg = _fmt_pct(row.get("concept_chg"))
             # 短线需关注反弹信号

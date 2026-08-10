@@ -504,8 +504,18 @@ class TushareProvider:
 
         logger.info("加载同花顺概念板块数据...")
         try:
-            # Step 1: 概念列表
-            concepts = self.pro.ths_index(exchange="A", type="N")
+            # Step 1: 概念列表 — 三种类型全量拉取
+            all_concepts = []
+            for ctype in ["I", "N", "S"]:  # I=行业, N=概念, S=风格
+                try:
+                    df = self.pro.ths_index(exchange="A", type=ctype, limit=5000)
+                    if df is not None and len(df) > 0:
+                        all_concepts.append(df)
+                except Exception:
+                    pass
+            concepts = pd.concat(all_concepts, ignore_index=True) if all_concepts else pd.DataFrame()
+            if len(concepts) == 0:
+                return pd.DataFrame()
             if concepts is None or len(concepts) == 0:
                 return pd.DataFrame()
             concept_codes = concepts[concepts["ts_code"].notna()]["ts_code"].tolist()
