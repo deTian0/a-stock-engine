@@ -77,6 +77,52 @@ def generate_brief(results: dict, config: dict) -> str:
     lines.append(f"# 盘前选股简报 — {today}\n")
     lines.append(f"> 生成时间: {results['timestamp']} | 耗时: {results['elapsed_seconds']}s\n")
 
+    # === 执行摘要（vnpy 风格通知） ===
+    mid = len(long_term)
+    short = len(short_df)
+    etf = len(etf_picks)
+    watch = len(watchlist) if watchlist is not None else 0
+    regime_name = regime.get("regime", "未知") if isinstance(regime, dict) else str(regime)
+    pos_cap_val = regime.get("position_cap", 0.5) if isinstance(regime, dict) else 0.5
+
+    # 板块集中度警告
+    top_sectors = long_term["sector"].value_counts().head(3) if len(long_term) > 0 and "sector" in long_term.columns else pd.Series(dtype=int)
+    sector_warnings = ""
+    for s, cnt in top_sectors.items():
+        if cnt >= 3:
+            sector_warnings += f"{s}板块集中({cnt}只) "
+
+    verdict = "持仓观望"
+    if "多头" in regime_name:
+        verdict = "可适度加仓"
+    elif "空头" in regime_name:
+        verdict = "减仓防御"
+    else:
+        verdict = "轻仓试探"
+
+    # === 执行摘要（vnpy 风格通知） ===
+    mid = len(long_term)
+    short = len(short_df)
+    etf = len(etf_picks)
+    watch = len(watchlist) if watchlist is not None else 0
+    regime_name = regime.get("regime", "未知") if isinstance(regime, dict) else str(regime)
+    pos_cap_val = regime.get("position_cap", 0.5) if isinstance(regime, dict) else 0.5
+
+    verdict = "持仓观望"
+    if "多头" in regime_name:
+        verdict = "可适度加仓"
+    elif "空头" in regime_name:
+        verdict = "减仓防御"
+    else:
+        verdict = "轻仓试探"
+
+    lines.append("> 📋 **执行摘要**\n")
+    lines.append(f"> 市场: **{regime_name}**({pos_cap_val:.0%}仓位) | "
+                 f"中长线 {mid}只 + 短线 {short}只 + ETF {etf}只 | "
+                 f"建议: **{verdict}**\n")
+    if sector_warnings:
+        lines.append(f"> ⚠️ {sector_warnings}\n")
+
     # ============================================================
     # 一、市场环境
     # ============================================================
