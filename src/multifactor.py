@@ -909,37 +909,22 @@ class MultiFactorEngine:
         except Exception as e:
             logger.debug(f"概念板块增强跳过: {e}")
 
-        # 补齐当日股价（westock-data 批量 kline — tushare daily_basic 不含 close）
+        # 补齐当日股价（westock-data kline — tushare daily_basic 不含 close）
         try:
             if len(l4_results) > 0 and "code" in l4_results.columns:
-                from westock_cli import _to_ws_code
-                import subprocess
+                from westock_helpers import batch_close_prices
                 codes = l4_results["code"].astype(str).str.zfill(6).unique().tolist()
-                ws_codes = ",".join(_to_ws_code(c) for c in codes)
-                r = subprocess.run(
-                    f"npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 1",
-                    capture_output=True, text=True, timeout=30, shell=True
-                )
-                if r.returncode == 0 and r.stdout:
-                    close_map = {}
-                    for line in r.stdout.strip().split("\n"):
-                        if "|" not in line or "symbol" in line or "Batch" in line:
-                            continue
-                        parts = [p.strip() for p in line.split("|")]
-                        if len(parts) >= 5 and parts[1]:
-                            code = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
-                            try:
-                                close_map[code] = float(parts[4])
-                            except ValueError:
-                                pass
-                    if close_map:
-                        l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
-                        l4_results["close"] = l4_results["code_str"].map(close_map)
-                        l4_results.drop(columns=["code_str"], inplace=True)
-                        filled = l4_results["close"].notna().sum()
-                        logger.info(f"当日股价补齐(westock): {filled}/{len(l4_results)} 只")
+                close_map = batch_close_prices(codes)
+                if close_map:
+                    l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
+                    l4_results["close"] = l4_results["code_str"].map(close_map)
+                    l4_results.drop(columns=["code_str"], inplace=True)
+                    filled = l4_results["close"].notna().sum()
+                    logger.info(f"当日股价补齐(westock): {filled}/{len(l4_results)} 只")
+                else:
+                    logger.warning("当日股价补齐失败: westock 返回空，npx可能不在PATH")
         except Exception as e:
-            logger.debug(f"当日股价补齐跳过: {e}")
+            logger.warning(f"当日股价补齐异常: {e}")
 
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")

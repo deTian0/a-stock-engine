@@ -32,53 +32,6 @@ from pick_tracker import get_tracking_report, get_tracking_summary, track_picks
 logger = logging.getLogger(__name__)
 
 
-def _fetch_change_pct_westock(codes: list[str]) -> dict[str, float]:
-    """用 westock-data batch kline 获取涨跌幅。分批调用，每批100只。返回 {code: change_pct%}。"""
-    import subprocess
-    if not codes:
-        return {}
-    
-    changes = {}
-    batch_size = 100
-    for i in range(0, len(codes), batch_size):
-        batch = codes[i:i + batch_size]
-        ws_codes = ",".join(f"sh{s}" if s.startswith(("6","9")) else 
-                            f"sz{s}" if s.startswith(("0","2","3")) else 
-                            f"bj{s}" for s in batch)
-        try:
-            result = subprocess.run(
-                f'npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 2',
-                capture_output=True, text=True, timeout=60, check=False, shell=True
-            )
-            if result.returncode != 0 or not result.stdout:
-                continue
-            latest, prev = {}, {}
-            for line in result.stdout.strip().split("\n"):
-                if not line or "|" not in line or "symbol" in line or "Batch" in line:
-                    continue
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) < 8:
-                    continue
-                symbol = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
-                try:
-                    close = float(parts[4])
-                except ValueError:
-                    continue
-                if symbol not in latest:
-                    latest[symbol] = close
-                elif symbol not in prev:
-                    prev[symbol] = close
-            for code, today in latest.items():
-                yesterday = prev.get(code, today)
-                if yesterday and yesterday > 0:
-                    changes[code] = round((today / yesterday - 1) * 100, 2)
-        except Exception:
-            continue
-
-    logger.info(f"westock涨跌幅: {len(changes)}/{len(codes)} 只 ({len(changes) and 100*len(changes)//len(changes) or 0}%覆盖)")
-    return changes
-
-
 def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
                     preloaded_prices: dict = None, config: dict = None) -> str:
     """
@@ -117,8 +70,8 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
         stock_list = stock_list[codes.str.startswith(("0","1","3","5","6"))]
         # 注入 westock-data 实时涨跌幅（tushare 不含 change_pct）
         if "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all():
-            sample_codes = stock_list["code"].astype(str).str.zfill(6).tolist()
-            chg_map = _fetch_change_pct_westock(sample_codes)
+            from westock_helpers import batch_change_pct
+            chg_map = batch_change_pct(stock_list["code"].astype(str).str.zfill(6).tolist())
             if chg_map:
                 stock_list["change_pct"] = stock_list["code"].astype(str).str.zfill(6).map(chg_map)
                 logger.info(f"已注入westock涨跌幅: {stock_list['change_pct'].notna().sum()} 只")
