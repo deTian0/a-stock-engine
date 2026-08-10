@@ -109,7 +109,7 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
             last_error = f"exit_code={e.returncode}"
 
         except FileNotFoundError:
-            logger.error("westock-data CLI 未找到，请确认已安装 westock-data skill")
+            logger.debug("westock-data CLI 未安装，将使用 tushare/akshare 回退")
             raise RuntimeError("westock-data CLI 不可用")
 
         except Exception as e:

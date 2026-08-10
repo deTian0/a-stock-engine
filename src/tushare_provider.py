@@ -153,10 +153,46 @@ class TushareProvider:
                         # tushare total_mv 单位: 万元 → 元
                         valuation["market_cap"] = valuation["total_mv"] * 10000
                         valuation["float_cap"] = valuation["circ_mv"] * 10000
-                        # 尝试补齐 amount/volume（字段可能不可用，设为极大值绕过过滤）
-                        for col, default in [("amount", 1e12), ("volume", 0.0)]:
-                            if col not in valuation.columns:
-                                valuation[col] = default
+                        # Step 2b: 从 daily 接口补齐 change_pct（涨跌幅）和 amount/volume
+                        try:
+                            daily_raw = self.pro.daily(trade_date=latest_date)
+                            if daily_raw is not None and len(daily_raw) > 0:
+                                daily_raw["code"] = daily_raw["ts_code"].apply(_from_ts_code)
+                                # 涨跌幅映射
+                                pct_map = {}
+                                for _, dr in daily_raw.iterrows():
+                                    c = dr.get("code", "")
+                                    chg = dr.get("pct_chg")
+                                    if c and chg is not None:
+                                        try:
+                                            pct_map[c] = float(chg)
+                                        except (ValueError, TypeError):
+                                            pass
+                                if pct_map:
+                                    valuation["change_pct"] = valuation["code"].map(pct_map)
+                                # 成交额映射（daily 有 amount，单位：千元）
+                                amt_map = {}
+                                for _, dr in daily_raw.iterrows():
+                                    c = dr.get("code", "")
+                                    amt = dr.get("amount")
+                                    if c and amt is not None:
+                                        try:
+                                            amt_map[c] = float(amt) * 1000  # 千元 → 元
+                                        except (ValueError, TypeError):
+                                            pass
+                                if amt_map:
+                                    valuation["amount"] = valuation["code"].map(amt_map)
+                                logger.info(f"daily 补齐: change_pct={valuation['change_pct'].notna().sum() if 'change_pct' in valuation.columns else 0} "
+                                           f"amount={valuation['amount'].notna().sum() if 'amount' in valuation.columns else 0}")
+                            else:
+                                logger.info("daily 接口返回空，尝试用 daily_basic 的 close/pre_close 计算涨跌幅")
+                                # 兜底：用 pre_close（如果 daily_basic 有此字段）
+                                if "pre_close" in valuation.columns:
+                                    valuation["change_pct"] = (
+                                        (valuation["close"] - valuation["pre_close"]) / valuation["pre_close"] * 100
+                                    )
+                        except Exception as e:
+                            logger.warning(f"daily 接口补齐行情数据失败: {type(e).__name__}: {e}")
                         # 合并
                         merge_cols = ["code", "close", "pe", "pb", "market_cap",
                                      "float_cap", "volume_ratio", "turnover_rate", "amount", "volume"]
@@ -338,14 +374,24 @@ class TushareProvider:
                 "total_mv": "market_cap",
             })
 
-            # 补充 name（从 stock_basic 缓存获取）
+            # 补充 name（stock_list → stock_basic兜底 → 代码兜底）
             try:
                 stock_list = self.get_stock_list()
                 if "code" in stock_list.columns and "name" in stock_list.columns:
-                    name_map = dict(zip(stock_list["code"], stock_list["name"]))
-                    combined["name"] = combined["code"].map(name_map)
+                    name_map = dict(zip(stock_list["code"].astype(str).str.zfill(6),
+                                       stock_list["name"]))
+                    combined["name"] = combined["code"].astype(str).str.zfill(6).map(name_map)
             except Exception:
                 pass
+            if "name" not in combined.columns or combined["name"].isna().sum() > len(combined) * 0.5:
+                try:
+                    basic = self.pro.stock_basic(exchange="", list_status="L",
+                                                  fields="ts_code,name")
+                    basic["code"] = basic["ts_code"].apply(_from_ts_code).str.zfill(6)
+                    nm = dict(zip(basic["code"], basic["name"]))
+                    combined["name"] = combined["code"].astype(str).str.zfill(6).map(nm)
+                except Exception:
+                    combined["name"] = combined["code"]  # 最终兜底用代码
 
             # 同时补充 PE/PB（从 daily_basic）
             try:

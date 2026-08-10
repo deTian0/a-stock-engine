@@ -393,8 +393,13 @@ class MultiFactorEngine:
                 factor_values["momentum_20d"] = 0.0
                 factor_values["momentum_60d"] = 0.0
 
-        # 板块信息
-        factor_values["sector"] = sector_map.get(code, "未知")
+        # 板块信息 — 优先映射，回退代码前缀推断
+        sector = sector_map.get(code, "")
+        if not sector or sector in ("未知", "", None) or (isinstance(sector, float) and pd.isna(sector)):
+            prefix = str(code)[:2] if len(str(code)) >= 2 else ""
+            sector = {"60":"沪市", "68":"科创板", "00":"深市", "30":"创业板", "00":"深市主板",
+                      "83":"北交所", "43":"北交所", "87":"北交所", "92":"北交所"}.get(prefix, "未知")
+        factor_values["sector"] = sector
 
         return factor_values
 
@@ -743,9 +748,30 @@ class MultiFactorEngine:
             ("515050", "5GETF"), ("516510", "云计算ETF"),
         ]
 
-        # 批量从 DB 获取 ETF 动量
+        # 批量从 DB 获取 ETF 动量 + 成交额
         codes_only = [c for c, _ in well_known_etfs]
         db_momentum = self._batch_calc_momentum(codes_only)
+        # 从 daily_price 取最近5日均成交额
+        etf_amounts = {}
+        try:
+            mdb = get_market_db()
+            batch_codes = [f"{c}.SZ" for c in codes_only] + [f"{c}.SH" for c in codes_only]
+            placeholders = ",".join("?" for _ in batch_codes)
+            rows = mdb.conn.execute(f"""
+                SELECT code, amount FROM daily_price
+                WHERE code IN ({placeholders}) AND amount > 0
+                ORDER BY code, date DESC
+                LIMIT {len(batch_codes) * 5}
+            """, batch_codes).fetchall()
+            from collections import defaultdict
+            amt_by_code = defaultdict(list)
+            for r in rows:
+                code = r["code"].split(".")[0].zfill(6)
+                amt_by_code[code].append(r["amount"])
+            for code, amounts in amt_by_code.items():
+                etf_amounts[code] = sum(amounts[:5]) / min(len(amounts), 5)
+        except Exception:
+            pass
 
         picks = []
         for code, name in well_known_etfs:
@@ -774,7 +800,7 @@ class MultiFactorEngine:
                     "etf_type": "宽基" if code.startswith(("51","58")) else "行业",
                     "momentum_20d": round(mom20, 2) if pd.notna(mom20) else 0,
                     "momentum_60d": round(mom60, 2) if pd.notna(mom60) else 0,
-                    "amount": 0,
+                    "amount": etf_amounts.get(code, 0),
                     "score": round(score + 50, 1),
                 })
             except Exception:
