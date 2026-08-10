@@ -44,23 +44,42 @@ def _kill_process_tree(pid: int) -> None:
         logger.warning(f"终止进程 {pid} 时出错: {e}")
 
 
+WESTOCK_CLI_CMD = ["npx", "-y", "westock-data-skillhub@1.0.5"]
+
+
+def _to_ws_code(code: str) -> str:
+    """6位代码 → westock sh/sz 前缀格式。"""
+    code = str(code).zfill(6)
+    if code.startswith(("6", "9")):
+        return f"sh{code}"
+    elif code.startswith(("8", "4")):
+        return f"bj{code}"
+    else:
+        return f"sz{code}"
+
+
+def _parse_pipe_table(output: str) -> list[dict]:
+    """解析 westock CLI 的 pipe-delimited 表格输出。"""
+    lines = output.strip().split("\n")
+    if len(lines) < 2:
+        return []
+    headers = [h.strip() for h in lines[0].split("|")[1:-1]]
+    rows = []
+    for line in lines[2:]:  # skip header separator
+        if not line.strip():
+            continue
+        vals = [v.strip() for v in line.split("|")[1:-1]]
+        if len(vals) >= len(headers):
+            rows.append(dict(zip(headers, vals)))
+    return rows
+
+
 def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str:
     """
     调用 westock-data CLI 并返回 stdout 输出。
     包含重试机制、超时处理、子进程清理。
-
-    Args:
-        args: CLI 参数列表
-        timeout: 超时秒数
-        max_retries: 最大重试次数
-
-    Returns:
-        CLI 的 stdout 输出（字符串）
-
-    Raises:
-        RuntimeError: 所有重试均失败时抛出
     """
-    cmd = ["westock-data"] + args
+    cmd = WESTOCK_CLI_CMD + args
     last_error = None
 
     for attempt in range(1, max_retries + 1):
@@ -203,28 +222,16 @@ class WestockCLI:
     # ---- 数据接口 ----
 
     def get_stock_list(self) -> pd.DataFrame:
-        """获取全A股股票列表。优先 westock-data，失败回退 tushare → akshare。"""
-        cache_key = "stock_list"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
-        try:
-            output = run_westock(["query", "--type", "stock_list", "--market", "A股"],
-                                 timeout=self._timeout, max_retries=1)
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
-        except Exception as e:
-            logger.info(f"westock-data 股票列表失败: {e}，回退 tushare")
-            if self._ts:
-                try:
-                    return self._ts.get_stock_list()
-                except Exception as e2:
-                    logger.info(f"tushare 股票列表失败: {e2}，回退 akshare")
-            if self._ak:
-                return self._ak.get_stock_list()
-            raise
+        """获取全A股股票列表。westock-data 不直接支持全量查询，跳过直接回退 tushare。"""
+        # westock-data 不支持全量股票列表，直接用 tushare
+        if self._ts:
+            try:
+                return self._ts.get_stock_list()
+            except Exception as e2:
+                logger.info(f"tushare 股票列表失败: {e2}，回退 akshare")
+        if self._ak:
+            return self._ak.get_stock_list()
+        raise RuntimeError("无可用的股票列表数据源")
 
     def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> pd.DataFrame:
         """获取个股K线数据。优先 westock-data，失败回退 tushare → akshare。"""
@@ -234,14 +241,18 @@ class WestockCLI:
             return pd.DataFrame(cached)
 
         try:
+            ws_code = _to_ws_code(code)
+            fq_map = {"qfq": "qfq", "hfq": "hfq", "": "bfq"}
+            fq = fq_map.get(adjust, "qfq")
             output = run_westock(
-                ["query", "--type", "kline", "--stock", code,
-                 "--days", str(days), "--adjust", adjust],
+                ["kline", ws_code, "--period", "day", "--limit", str(days), "--fq", fq],
                 timeout=self._timeout, max_retries=1
             )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
+            rows = _parse_pipe_table(output)
+            if rows:
+                df = pd.DataFrame(rows)
+                self._write_cache(cache_key, df.to_dict(orient="records"))
+                return df
         except Exception as e:
             logger.debug(f"westock-data K线失败 {code}: {e}，回退 tushare")
             if self._ts:
@@ -261,13 +272,16 @@ class WestockCLI:
             return pd.DataFrame(cached)
 
         try:
+            ws_code = _to_ws_code(code)
             output = run_westock(
-                ["query", "--type", "kline", "--index", code, "--days", str(days)],
+                ["kline", ws_code, "--period", "day", "--limit", str(days)],
                 timeout=self._timeout, max_retries=1
             )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
+            rows = _parse_pipe_table(output)
+            if rows:
+                df = pd.DataFrame(rows)
+                self._write_cache(cache_key, df.to_dict(orient="records"))
+                return df
         except Exception as e:
             logger.debug(f"westock-data 指数K线失败 {code}: {e}，回退 tushare")
             if self._ts:
@@ -280,21 +294,31 @@ class WestockCLI:
             return pd.DataFrame()
 
     def get_fundamentals(self, codes: list[str]) -> pd.DataFrame:
-        """获取基本面数据。优先 westock-data，失败回退 tushare → akshare。"""
+        """获取基本面数据（profile）。优先 westock-data，失败回退 tushare。"""
         import hashlib
-        cache_key = f"fundamentals_{hashlib.md5(','.join(sorted(codes)).encode()).hexdigest()[:12]}"
+        key_hash = hashlib.md5(",".join(sorted([str(c) for c in codes[:30]])).encode()).hexdigest()[:12]
+        cache_key = f"fundamentals_{key_hash}_{len(codes)}"
         cached = self._read_cache(cache_key)
         if cached:
             return pd.DataFrame(cached)
 
         try:
+            # profile 支持批量，代码逗号分隔
+            ws_codes = ",".join(_to_ws_code(c) for c in codes[:50])  # batch up to 50
             output = run_westock(
-                ["query", "--type", "fundamentals", "--stocks", ",".join(codes)],
+                ["profile", ws_codes],
                 timeout=self._timeout, max_retries=1
             )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
+            rows = _parse_pipe_table(output)
+            if rows:
+                df = pd.DataFrame(rows)
+                # 映射列名
+                col_map = {"code": "code", "industry": "sector", "business": "business"}
+                df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+                # 提取6位代码
+                df["code"] = df["code"].str.replace("sh", "").str.replace("sz", "").str.replace("bj", "").str.zfill(6)
+                self._write_cache(cache_key, df.to_dict(orient="records"))
+                return df
         except Exception as e:
             logger.info(f"westock-data 基本面失败: {e}，回退 tushare")
             if self._ts:
@@ -307,56 +331,26 @@ class WestockCLI:
             return pd.DataFrame()
 
     def get_sector_mapping(self) -> dict[str, str]:
-        """获取板块映射。优先 westock-data，失败回退 tushare → akshare。"""
-        cache_key = "sector_mapping"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return cached
-
-        try:
-            output = run_westock(
-                ["query", "--type", "sector_mapping"],
-                timeout=self._timeout, max_retries=1
-            )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return data
-        except Exception as e:
-            logger.info(f"westock-data 板块映射失败: {e}，回退 tushare")
-            if self._ts:
-                try:
-                    return self._ts.get_sector_mapping()
-                except Exception as e2:
-                    logger.info(f"tushare 板块映射失败: {e2}，回退 akshare")
-            if self._ak:
-                return self._ak.get_sector_mapping()
-            return {}
+        """获取板块映射。westock-data profile 单股返回 industry，不适合全量查询 → 直接回退 tushare。"""
+        if self._ts:
+            try:
+                return self._ts.get_sector_mapping()
+            except Exception as e2:
+                logger.info(f"tushare 板块映射失败: {e2}，回退 akshare")
+        if self._ak:
+            return self._ak.get_sector_mapping()
+        return {}
 
     def get_sector_list(self) -> pd.DataFrame:
-        """获取板块行情列表。优先 westock-data，失败回退 tushare → akshare。"""
-        cache_key = "sector_list"
-        cached = self._read_cache(cache_key)
-        if cached:
-            return pd.DataFrame(cached)
-
-        try:
-            output = run_westock(
-                ["query", "--type", "sector_list"],
-                timeout=self._timeout, max_retries=1
-            )
-            data = json.loads(output)
-            self._write_cache(cache_key, data)
-            return pd.DataFrame(data)
-        except Exception as e:
-            logger.info(f"westock-data 板块列表失败: {e}，回退 tushare")
-            if self._ts:
-                try:
-                    return self._ts.get_sector_list()
-                except Exception as e2:
-                    logger.info(f"tushare 板块列表失败: {e2}，回退 akshare")
-            if self._ak:
-                return self._ak.get_sector_list()
-            return pd.DataFrame()
+        """获取板块行情列表。westock-data 不直接支持 → 回退 tushare。"""
+        if self._ts:
+            try:
+                return self._ts.get_sector_list()
+            except Exception as e2:
+                logger.info(f"tushare 板块列表失败: {e2}，回退 akshare")
+        if self._ak:
+            return self._ak.get_sector_list()
+        return pd.DataFrame()
 
 
 # ---- 全局单例 ----
