@@ -251,8 +251,6 @@ class StockDB:
         today = datetime.now().strftime("%Y-%m-%d")
         c = self.conn
 
-        run_id = c.execute("SELECT COALESCE(MAX(run_id), 0) + 1 FROM stock_picks").fetchone()[0]
-
         rows = []
         for cat_name, cat_df in categories.items():
             if cat_df is None or len(cat_df) == 0:
@@ -260,7 +258,7 @@ class StockDB:
             for _, row in cat_df.iterrows():
                 code = row.get("code", "")
                 rows.append((
-                    run_id, today, code,
+                    today, code,
                     str(row.get("name", code)),
                     cat_name,
                     float(row.get("composite_score", 0)) if row.get("composite_score") is not None else 0,
@@ -271,14 +269,16 @@ class StockDB:
                     session_type,
                 ))
 
+        run_id = None
         if rows:
             c.executemany("""
-                INSERT INTO stock_picks
-                (run_id, date, code, name, category, composite_score, sector,
+                INSERT OR REPLACE INTO stock_picks
+                (date, code, name, category, composite_score, sector,
                  regime, position_cap, l2_filtered, elapsed_sec, session_type)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """, rows)
             c.commit()
+            run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         logger.info(f"选股结果已入库: run_id={run_id}, {len(rows)} 条, session={session_type}")
         return run_id
