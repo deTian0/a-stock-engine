@@ -369,7 +369,7 @@ class TushareProvider:
             logger.info(f"tushare 基本面: {len(combined)} 条 "
                         f"(ROE有效: {combined['roe'].notna().sum()}, "
                         f"毛利率有效: {combined['gross_margin'].notna().sum()})")
-            self.db.cache_put(cache_key, "fundamentals", combined, self._source, 24)
+            self.db.cache_put(cache_key, "fundamentals", combined, self._source, 168)
             return combined
 
         except Exception as e:
@@ -404,7 +404,7 @@ class TushareProvider:
             mapping_df = pd.DataFrame([
                 {"code": k, "sector": v} for k, v in result.items()
             ])
-            self.db.cache_put(cache_key, "sector_mapping", mapping_df, self._source, 24)
+            self.db.cache_put(cache_key, "sector_mapping", mapping_df, self._source, 168)
             logger.info(f"tushare 板块映射: {len(result)} 只")
             return result
         except Exception as e:
