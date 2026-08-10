@@ -78,12 +78,11 @@ def review_sectors(cli, price_loader) -> str:
             top = f"{row['max_chg']:.1f}%" if pd.notna(row["max_chg"]) else "-"
             amt = f"{row['total_amt']/1e8:.0f}" if pd.notna(row.get("total_amt")) else "-"
             lines.append(f"| {name} | {avg} | {cnt} | {top} | {amt} |")
+        top_sector_names = top_sectors["sector"].tolist()
     else:
         lines.append("_板块数据暂不可用_\n")
         top_sector_names = []
         stock_list = pd.DataFrame()
-    else:
-        top_sector_names = top_sectors["sector"].tolist()
     
     # ============================================================
     # 2. 板块内最强个股
