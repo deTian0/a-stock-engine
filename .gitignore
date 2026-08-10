@@ -12,6 +12,7 @@ build/
 
 # Data cache
 data_cache/
+data_cache.rar
 *.csv
 *.json
 !config/config.yaml
@@ -28,3 +29,7 @@ briefs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets
+.env
+*.env.local

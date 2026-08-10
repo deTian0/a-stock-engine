@@ -134,7 +134,7 @@ class AkshareProvider:
             return pd.DataFrame()
 
     def get_index_kline(self, code: str, days: int = 60) -> Optional[pd.DataFrame]:
-        """获取指数日K线数据。"""
+        """获取指数日K线数据。支持上证(0xxx)/深证(3xxx)/创业板(3xxx)。"""
         cache_key = f"index_kline_{code}_{days}"
         cached = self.db.cache_get(cache_key)
         if cached is not None:
@@ -145,30 +145,64 @@ class AkshareProvider:
             start_date = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
             end_date = datetime.now().strftime("%Y%m%d")
 
-            # 指数代码映射
-            idx_map = {
-                "000001": "000001",  # 上证指数
-                "399001": "399001",  # 深证成指
-                "399006": "399006",  # 创业板指
-            }
-            symbol = idx_map.get(code, code)
+            # 指数代码 → akshare symbol 映射
+            # 上证: sh000001, 深证成指: sz399001, 创业板指: sz399006
+            if code.startswith("0"):
+                symbol = f"sh{code}"
+            elif code.startswith("3"):
+                symbol = f"sz{code}"
+            else:
+                symbol = code
 
-            df = ak.stock_zh_index_daily(symbol=f"sh{symbol}" if code.startswith("0") else f"sz{symbol}")
+            df = None
+            # 尝试多种 akshare API（版本兼容）
+            for attempt_func in [
+                lambda: ak.stock_zh_index_daily(symbol=symbol),
+                lambda: ak.index_zh_a_hist(symbol=code, period="daily",
+                                           start_date=start_date, end_date=end_date),
+            ]:
+                try:
+                    df = attempt_func()
+                    if df is not None and len(df) > 0:
+                        break
+                except Exception:
+                    continue
+
             if df is None or len(df) == 0:
+                logger.warning(f"akshare 指数K线为空: {code}")
                 return pd.DataFrame()
 
-            df = df.rename(columns={
-                "date": "date",
-                "open": "open",
-                "close": "close",
-                "high": "high",
-                "low": "low",
-                "volume": "volume",
-                "amount": "amount",
-            })
-            df["date"] = pd.to_datetime(df["date"])
+            # 标准化列名（兼容中文/英文列名）
+            col_map = {}
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if col_lower in ("date", "日期", "trade_date"):
+                    col_map[col] = "date"
+                elif col_lower in ("open", "开盘", "开盘价"):
+                    col_map[col] = "open"
+                elif col_lower in ("close", "收盘", "收盘价"):
+                    col_map[col] = "close"
+                elif col_lower in ("high", "最高", "最高价"):
+                    col_map[col] = "high"
+                elif col_lower in ("low", "最低", "最低价"):
+                    col_map[col] = "low"
+                elif col_lower in ("volume", "vol", "成交量"):
+                    col_map[col] = "volume"
+                elif col_lower in ("amount", "成交额"):
+                    col_map[col] = "amount"
+                elif col_lower in ("pct_chg", "涨跌幅"):
+                    col_map[col] = "change_pct"
+
+            if col_map:
+                df = df.rename(columns=col_map)
+
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"])
             df = df.sort_values("date").tail(days).reset_index(drop=True)
-            self.db.cache_put(cache_key, "index_kline", df, self._source, self._cache_ttl)
+
+            if len(df) > 0:
+                self.db.cache_put(cache_key, "index_kline", df, self._source, self._cache_ttl)
+                logger.debug(f"akshare: 指数K线 {code} {len(df)} 行")
             return df
         except Exception as e:
             logger.error(f"akshare 获取指数K线失败 {code}: {e}")

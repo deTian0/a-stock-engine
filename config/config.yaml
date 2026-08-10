@@ -38,44 +38,53 @@ filter_l2:
   exclude_st: true                # 排除ST/*ST
   exclude_new: true               # 排除上市不足60天
   exclude_suspended: true         # 排除停牌
-  min_market_cap: 20              # 最小市值（亿元）
+  min_market_cap: 2000000000      # 最小市值（元，=20亿。数据源返回元）
   max_pe: 200                     # 最大PE（排除负PE和异常值）
-  min_daily_amount: 0.5           # 最小日均成交额（亿元）
+  min_daily_amount: 0.5           # 最小日均成交额（亿元，代码内 ×1e8 转元）
 
 # --- L4 多因子评分 ---
 factor_l4:
+  # 因子权重说明:
+  #   - pe/pb/market_cap 来自实时行情或本地快照（可靠）
+  #   - roe/gross_margin 需要基本面数据源（本地快照优先，CLI 备选）
+  #   - momentum_20d/60d 从 DB daily_price 批量计算（性能优化）
+  #   - 若某因子数据全为默认值(0)，排名退化为均匀分布，不影响排序
   factors:
-    # 价值因子
-    - name: "pe_rank"
-      weight: 0.10
+    # 价值因子 — 列名必须与 _extract_fundamentals 输出一致
+    - name: "pe"
+      weight: 0.12
       direction: "ascending"      # PE越低越好
-    - name: "pb_rank"
+    - name: "pb"
       weight: 0.08
-      direction: "ascending"
-    # 质量因子
+      direction: "ascending"      # PB越低越好
+    # 质量因子（需本地快照或 CLI 补充，缺失时自动跳过）
     - name: "roe"
-      weight: 0.20
+      weight: 0.15
       direction: "descending"     # ROE越高越好
     - name: "gross_margin"
-      weight: 0.10
+      weight: 0.08
       direction: "descending"
     - name: "debt_ratio"
-      weight: 0.07
+      weight: 0.05
       direction: "ascending"      # 负债率越低越好
     # 成长因子
     - name: "revenue_growth"
-      weight: 0.15
+      weight: 0.10
       direction: "descending"
     - name: "profit_growth"
-      weight: 0.15
+      weight: 0.10
       direction: "descending"
-    # 动量因子
+    # 动量因子 — 从 local_price_loader 或 DB 批量计算
     - name: "momentum_20d"
-      weight: 0.08
+      weight: 0.12
       direction: "descending"
     - name: "momentum_60d"
-      weight: 0.07
+      weight: 0.10
       direction: "descending"
+    # 小市值因子
+    - name: "market_cap"
+      weight: 0.10
+      direction: "ascending"      # 小市值溢价（越低市值加权越高）
   top_n: 30                       # L4最终选出前N只
 
 # --- 输出配置 ---
@@ -97,7 +106,7 @@ data_source:
 
 # --- v5 反弹引擎 ---
 rebound_engine:
-  enabled: true
+  enabled: false                  # 暂时禁用（需要网络K线，当前离线模式）
   lookback_days: 10               # 回看天数
   decline_threshold: -0.08        # 跌幅阈值（-8%）
   volume_surge_ratio: 1.5         # 量比阈值

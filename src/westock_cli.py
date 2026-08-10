@@ -133,7 +133,7 @@ def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str
 
 
 class WestockCLI:
-    """westock-data CLI 封装，失败时自动回退到 akshare。"""
+    """westock-data CLI 封装，失败时自动回退: tushare → akshare。"""
 
     def __init__(self, cache_dir: str = "data_cache", cache_expiry_hours: int = 12):
         self.cache_dir = Path(cache_dir)
@@ -142,6 +142,23 @@ class WestockCLI:
         self._timeout = 30
         self._max_retries = 3
         self._akshare = None  # 懒加载
+        self._tushare = None  # 懒加载
+
+    @property
+    def _ts(self):
+        """懒加载 tushare provider（优先级高于 akshare）。"""
+        if self._tushare is None:
+            try:
+                from tushare_provider import get_tushare
+                self._tushare = get_tushare()
+                logger.info("已启用 tushare 数据源作为后备")
+            except ImportError as e:
+                logger.info(f"tushare 未安装: {e}")
+                self._tushare = None
+            except Exception as e:
+                logger.warning(f"tushare 初始化失败: {e}")
+                self._tushare = None
+        return self._tushare
 
     # ---- 缓存管理 ----
 
@@ -186,7 +203,7 @@ class WestockCLI:
     # ---- 数据接口 ----
 
     def get_stock_list(self) -> pd.DataFrame:
-        """获取全A股股票列表。优先 westock-data，失败回退 akshare。"""
+        """获取全A股股票列表。优先 westock-data，失败回退 tushare → akshare。"""
         cache_key = "stock_list"
         cached = self._read_cache(cache_key)
         if cached:
@@ -199,13 +216,18 @@ class WestockCLI:
             self._write_cache(cache_key, data)
             return pd.DataFrame(data)
         except Exception as e:
-            logger.info(f"westock-data 股票列表失败: {e}，回退 akshare")
+            logger.info(f"westock-data 股票列表失败: {e}，回退 tushare")
+            if self._ts:
+                try:
+                    return self._ts.get_stock_list()
+                except Exception as e2:
+                    logger.info(f"tushare 股票列表失败: {e2}，回退 akshare")
             if self._ak:
                 return self._ak.get_stock_list()
             raise
 
     def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> pd.DataFrame:
-        """获取个股K线数据。优先 westock-data，失败回退 akshare。"""
+        """获取个股K线数据。优先 westock-data，失败回退 tushare → akshare。"""
         cache_key = f"kline_{code}_{days}_{adjust}"
         cached = self._read_cache(cache_key)
         if cached:
@@ -221,13 +243,18 @@ class WestockCLI:
             self._write_cache(cache_key, data)
             return pd.DataFrame(data)
         except Exception as e:
-            logger.debug(f"westock-data K线失败 {code}: {e}，回退 akshare")
+            logger.debug(f"westock-data K线失败 {code}: {e}，回退 tushare")
+            if self._ts:
+                try:
+                    return self._ts.get_kline(code, days, adjust)
+                except Exception as e2:
+                    logger.debug(f"tushare K线失败 {code}: {e2}，回退 akshare")
             if self._ak:
                 return self._ak.get_kline(code, days, adjust)
             return pd.DataFrame()
 
     def get_index_kline(self, code: str, days: int = 60) -> pd.DataFrame:
-        """获取指数K线数据。优先 westock-data，失败回退 akshare。"""
+        """获取指数K线数据。优先 westock-data，失败回退 tushare → akshare。"""
         cache_key = f"index_kline_{code}_{days}"
         cached = self._read_cache(cache_key)
         if cached:
@@ -242,13 +269,18 @@ class WestockCLI:
             self._write_cache(cache_key, data)
             return pd.DataFrame(data)
         except Exception as e:
-            logger.debug(f"westock-data 指数K线失败 {code}: {e}，回退 akshare")
+            logger.debug(f"westock-data 指数K线失败 {code}: {e}，回退 tushare")
+            if self._ts:
+                try:
+                    return self._ts.get_index_kline(code, days)
+                except Exception as e2:
+                    logger.debug(f"tushare 指数K线失败 {code}: {e2}，回退 akshare")
             if self._ak:
                 return self._ak.get_index_kline(code, days)
             return pd.DataFrame()
 
     def get_fundamentals(self, codes: list[str]) -> pd.DataFrame:
-        """获取基本面数据。优先 westock-data，失败回退 akshare。"""
+        """获取基本面数据。优先 westock-data，失败回退 tushare → akshare。"""
         import hashlib
         cache_key = f"fundamentals_{hashlib.md5(','.join(sorted(codes)).encode()).hexdigest()[:12]}"
         cached = self._read_cache(cache_key)
@@ -264,13 +296,18 @@ class WestockCLI:
             self._write_cache(cache_key, data)
             return pd.DataFrame(data)
         except Exception as e:
-            logger.info(f"westock-data 基本面失败: {e}，回退 akshare")
+            logger.info(f"westock-data 基本面失败: {e}，回退 tushare")
+            if self._ts:
+                try:
+                    return self._ts.get_fundamentals(codes)
+                except Exception as e2:
+                    logger.info(f"tushare 基本面失败: {e2}，回退 akshare")
             if self._ak:
                 return self._ak.get_fundamentals(codes)
             return pd.DataFrame()
 
     def get_sector_mapping(self) -> dict[str, str]:
-        """获取板块映射。优先 westock-data，失败回退 akshare。"""
+        """获取板块映射。优先 westock-data，失败回退 tushare → akshare。"""
         cache_key = "sector_mapping"
         cached = self._read_cache(cache_key)
         if cached:
@@ -285,13 +322,18 @@ class WestockCLI:
             self._write_cache(cache_key, data)
             return data
         except Exception as e:
-            logger.info(f"westock-data 板块映射失败: {e}，回退 akshare")
+            logger.info(f"westock-data 板块映射失败: {e}，回退 tushare")
+            if self._ts:
+                try:
+                    return self._ts.get_sector_mapping()
+                except Exception as e2:
+                    logger.info(f"tushare 板块映射失败: {e2}，回退 akshare")
             if self._ak:
                 return self._ak.get_sector_mapping()
             return {}
 
     def get_sector_list(self) -> pd.DataFrame:
-        """获取板块行情列表。优先 westock-data，失败回退 akshare。"""
+        """获取板块行情列表。优先 westock-data，失败回退 tushare → akshare。"""
         cache_key = "sector_list"
         cached = self._read_cache(cache_key)
         if cached:
@@ -306,7 +348,12 @@ class WestockCLI:
             self._write_cache(cache_key, data)
             return pd.DataFrame(data)
         except Exception as e:
-            logger.info(f"westock-data 板块列表失败: {e}，回退 akshare")
+            logger.info(f"westock-data 板块列表失败: {e}，回退 tushare")
+            if self._ts:
+                try:
+                    return self._ts.get_sector_list()
+                except Exception as e2:
+                    logger.info(f"tushare 板块列表失败: {e2}，回退 akshare")
             if self._ak:
                 return self._ak.get_sector_list()
             return pd.DataFrame()

@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from westock_cli import get_cli, sector_of
 from local_price_loader import LocalPriceLoader
-from database import get_db
+from database import get_db, get_market_db
 from enrich_short import enrich
 
 logger = logging.getLogger(__name__)
@@ -237,40 +237,161 @@ class MultiFactorEngine:
 
     # ========================================
     def _extract_fundamentals(self, fund_row) -> dict:
-        """从单行基本面数据提取因子值。"""
+        """从单行基本面数据提取因子值。缺失/异常值返回 NaN（排名时排末尾）。"""
         row = fund_row
+        
+        def _safe_float(key, default=np.nan, min_val=None, max_val=None):
+            """安全提取浮点数，无效时返回 NaN。"""
+            val = row.get(key)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return default
+            try:
+                v = float(val)
+                if min_val is not None and v < min_val:
+                    return default
+                if max_val is not None and v > max_val:
+                    return max_val
+                return v
+            except (ValueError, TypeError):
+                return default
+
         return {
-            "pe": float(row.get("pe", 0)) if pd.notna(row.get("pe")) else 999,
-            "pb": float(row.get("pb", 0)) if pd.notna(row.get("pb")) else 999,
-            "roe": float(row.get("roe", 0)) if pd.notna(row.get("roe")) else 0,
-            "gross_margin": float(row.get("gross_margin", 0)) if pd.notna(row.get("gross_margin")) else 0,
-            "debt_ratio": float(row.get("debt_ratio", 100)) if pd.notna(row.get("debt_ratio")) else 100,
-            "revenue_growth": float(row.get("revenue_growth", 0)) if pd.notna(row.get("revenue_growth")) else 0,
-            "profit_growth": float(row.get("profit_growth", 0)) if pd.notna(row.get("profit_growth")) else 0,
-            "market_cap": float(row.get("market_cap", 0)) if pd.notna(row.get("market_cap")) else 0,
+            "pe": _safe_float("pe", min_val=0.01),        # PE=0 无效，排除
+            "pb": _safe_float("pb", min_val=0.01),
+            "roe": _safe_float("roe"),
+            "gross_margin": _safe_float("gross_margin"),
+            "debt_ratio": _safe_float("debt_ratio", min_val=0, max_val=100),
+            "revenue_growth": _safe_float("revenue_growth"),
+            "profit_growth": _safe_float("profit_growth"),
+            "market_cap": _safe_float("market_cap", min_val=0),
             "name": str(row.get("name", "")) if "name" in row else "",
         }
 
-    def _fetch_stock_data(self, code: str, fund_lookup: dict, sector_map: dict) -> dict:
-        """获取单只股票的数据（价格+基本面+板块），用于并发调用。"""
+    def _load_local_snapshot(self) -> Optional[pd.DataFrame]:
+        """
+        从 market.db 加载最新一期本地快照数据（后复权截面）。
+        忽略过期时间（历史截面数据永不过期）。
+        自动标准化 code 列为 6 位字符串。
+        """
+        try:
+            mdb = get_market_db()
+            row = mdb.conn.execute("""
+                SELECT cache_key, data_json FROM market_data_cache
+                WHERE data_type='daily_snapshot'
+                ORDER BY cache_key DESC LIMIT 1
+            """).fetchone()
+            if row is None:
+                logger.info("本地快照: market.db 中无 daily_snapshot 数据")
+                return None
+            cache_key = row["cache_key"]
+            data_json = row["data_json"]
+            if not data_json:
+                logger.info(f"本地快照 {cache_key} JSON 为空")
+                return None
+            from io import StringIO
+            df = pd.read_json(StringIO(data_json), orient="records")
+            if df is None or len(df) == 0:
+                logger.info(f"本地快照 {cache_key} 解析为空")
+                return None
+            
+            # 标准化 code 列: 确保是 6 位字符串（如 "000001"）
+            if "code" in df.columns:
+                df["code"] = df["code"].astype(str).str.replace(r"\.(SZ|SH|BJ)$", "", regex=True).str.zfill(6)
+            
+            logger.info(f"本地快照命中: {cache_key}, {len(df)} 行 (code 示例: {df['code'].iloc[0] if len(df) > 0 else 'N/A'})")
+            return df
+        except Exception as e:
+            logger.warning(f"加载本地快照失败 [{type(e).__name__}]: {e}")
+            return None
+
+    def _batch_calc_momentum(self, codes: list[str]) -> dict[str, dict]:
+        """
+        从 market.db 的 daily_price 表批量计算 20日/60日动量。
+        daily_price 中 code 格式为 "000001.SZ"，自动去后缀匹配。
+        """
+        if not codes:
+            return {}
+        try:
+            mdb = get_market_db()
+            from collections import defaultdict
+            prices = defaultdict(list)
+            batch_size = 500
+
+            for i in range(0, len(codes), batch_size):
+                batch = codes[i:i + batch_size]
+                # 同时匹配纯数字和带后缀的格式
+                batch_plain = [c for c in batch]
+                batch_with_sz = [f"{c}.SZ" for c in batch]
+                batch_with_sh = [f"{c}.SH" for c in batch]
+                all_patterns = batch_plain + batch_with_sz + batch_with_sh
+                placeholders = ",".join("?" for _ in all_patterns)
+                rows = mdb.conn.execute(f"""
+                    SELECT code, date, close FROM daily_price
+                    WHERE code IN ({placeholders})
+                    ORDER BY code, date DESC
+                """, all_patterns).fetchall()
+                for r in rows:
+                    # 去掉交易所后缀统一匹配
+                    code_clean = r["code"].split(".")[0].zfill(6)
+                    prices[code_clean].append(r["close"])
+
+            if not prices:
+                logger.info("daily_price 表无数据，无法批量计算动量")
+                return {}
+
+            results = {}
+            hit_count = 0
+            for code in codes:
+                closes = prices.get(code, [])
+                if len(closes) >= 61:
+                    results[code] = {
+                        "momentum_20d": round((closes[0] / closes[20] - 1) * 100, 2),
+                        "momentum_60d": round((closes[0] / closes[60] - 1) * 100, 2),
+                    }
+                    hit_count += 1
+                elif len(closes) >= 21:
+                    results[code] = {
+                        "momentum_20d": round((closes[0] / closes[20] - 1) * 100, 2),
+                        "momentum_60d": 0.0,
+                    }
+                    hit_count += 1
+                else:
+                    results[code] = {"momentum_20d": 0.0, "momentum_60d": 0.0}
+            logger.info(f"批量动量计算: {hit_count}/{len(codes)} 只有效 (daily_price 命中)")
+            return results
+        except Exception as e:
+            logger.warning(f"批量动量计算失败: {e}")
+            return {}
+
+    def _fetch_stock_data(self, code: str, fund_lookup: dict, sector_map: dict,
+                          batch_momentum: dict = None) -> dict:
+        """获取单只股票的数据（基本面+动量+板块），用于并发调用。
+        
+        动量数据优先从 batch_momentum（DB 批量预取）获取，
+        失败时回退到逐只 CLI 调用。
+        """
         factor_values = {"code": code}
 
         # 从预构建的基本面字典中提取
         if code in fund_lookup:
             factor_values.update(fund_lookup[code])
 
-        # 获取价格数据计算动量
-        try:
-            price_df = self.price_loader.get_price(code, days=70)
-            if len(price_df) >= 60:
-                factor_values["momentum_20d"] = self.price_loader.calc_momentum(price_df, 20)
-                factor_values["momentum_60d"] = self.price_loader.calc_momentum(price_df, 60)
-            else:
+        # 动量数据: 优先批量 DB 预取，回退 CLI
+        if batch_momentum and code in batch_momentum:
+            factor_values.update(batch_momentum[code])
+        else:
+            # 回退: 逐只 CLI 获取 K 线计算动量
+            try:
+                price_df = self.price_loader.get_price(code, days=70)
+                if len(price_df) >= 60:
+                    factor_values["momentum_20d"] = self.price_loader.calc_momentum(price_df, 20)
+                    factor_values["momentum_60d"] = self.price_loader.calc_momentum(price_df, 60)
+                else:
+                    factor_values["momentum_20d"] = 0.0
+                    factor_values["momentum_60d"] = 0.0
+            except Exception:
                 factor_values["momentum_20d"] = 0.0
                 factor_values["momentum_60d"] = 0.0
-        except Exception:
-            factor_values["momentum_20d"] = 0.0
-            factor_values["momentum_60d"] = 0.0
 
         # 板块信息
         factor_values["sector"] = sector_map.get(code, "未知")
@@ -285,10 +406,10 @@ class MultiFactorEngine:
         L4 多因子评分：对通过 L2 的股票进行综合评分排序。
 
         评分流程:
-        1. 批量获取基本面数据
-        2. 并发获取所有股票价格数据（ThreadPoolExecutor, 8 workers）
-        3. 计算各因子值 + 加权综合评分
-        4. 按评分降序排列
+        1. 优先从 market.db 加载本地快照（基本面 + 多周期动量）
+        2. 批量从 daily_price 计算 20d/60d 动量
+        3. CLI 基本面 / 逐只 K 线作为回退
+        4. 计算各因子值 + 加权综合评分
         """
         cfg = self.config["factor_l4"]
         factors_cfg = cfg["factors"]
@@ -298,31 +419,47 @@ class MultiFactorEngine:
             logger.warning("L4 无候选股票")
             return pd.DataFrame()
 
-        codes = candidates["code"].tolist() if "code" in candidates.columns else []
+        codes = [str(c).zfill(6) for c in (candidates["code"].tolist() if "code" in candidates.columns else [])]
         total = len(codes)
         logger.info(f"L4 评分: 开始处理 {total} 只股票...")
 
-        # Step 1: 批量获取基本面数据
-        try:
-            fundamentals = self.cli.get_fundamentals(codes)
-            logger.info(f"  基本面数据获取完成: {len(fundamentals)} 条")
-        except Exception as e:
-            logger.error(f"获取基本面数据失败: {e}")
-            fundamentals = pd.DataFrame()
-
-        # 构建基本面查找字典
+        # === Step 1: 尝试本地快照（基本面 + 多周期动量） ===
         fund_lookup = {}
-        if len(fundamentals) > 0 and "code" in fundamentals.columns:
-            for _, row in fundamentals.iterrows():
+        snapshot_df = self._load_local_snapshot()
+        if snapshot_df is not None and len(snapshot_df) > 0:
+            codes_set = set(codes)
+            hit = 0
+            for _, row in snapshot_df.iterrows():
                 code = str(row.get("code", ""))
-                fund_lookup[code] = self._extract_fundamentals(row)
+                if code in codes_set:
+                    fund_lookup[code] = self._extract_fundamentals(row)
+                    hit += 1
+            logger.info(f"  本地快照基本面: {hit}/{total} 只命中")
+        else:
+            logger.info("  本地快照不可用，将使用 CLI 获取基本面")
 
-        # Step 2: 预加载板块映射（避免并发中重复CLI调用）
+        # === Step 2: 批量计算动量（从 daily_price 表） ===
+        batch_momentum = self._batch_calc_momentum(codes)
+
+        # === Step 3: CLI 补充（仅对快照中缺失的股票） ===
+        missing_codes = [c for c in codes if c not in fund_lookup]
+        if missing_codes:
+            try:
+                fundamentals = self.cli.get_fundamentals(missing_codes)
+                logger.info(f"  CLI 基本面补充: {len(fundamentals)} 条 (缺失 {len(missing_codes)} 只)")
+                if len(fundamentals) > 0 and "code" in fundamentals.columns:
+                    for _, row in fundamentals.iterrows():
+                        code = str(row.get("code", ""))
+                        fund_lookup[code] = self._extract_fundamentals(row)
+            except Exception as e:
+                logger.warning(f"CLI 基本面获取失败: {e}")
+
+        # === Step 4: 预加载板块映射 ===
         sector_map = self.sector_mapping
 
-        # Step 3: 并发获取价格数据（信号安全）
+        # === Step 5: 并发获取数据（无 CLI 动量调用时更快） ===
         max_workers = min(self.config.get("concurrency", {}).get("max_workers", 4), total)
-        logger.info(f"  并发获取价格数据: {max_workers} workers, {total} 只股票...")
+        logger.info(f"  并发组装因子: {max_workers} workers, {total} 只股票...")
 
         factor_list = []
         completed = 0
@@ -331,22 +468,19 @@ class MultiFactorEngine:
         executor = ThreadPoolExecutor(max_workers=max_workers)
 
         try:
-            # Reset shutdown flag before starting
             _executor_shutdown.clear()
 
             for code in codes:
                 future = executor.submit(
-                    self._fetch_stock_data, code, fund_lookup, sector_map
+                    self._fetch_stock_data, code, fund_lookup, sector_map, batch_momentum
                 )
                 futures_map[future] = code
-                # 错峰提交：每提交一个 worker 休息几毫秒，避免瞬时 CPU 尖峰
                 if len(futures_map) <= max_workers:
                     delay = self.config.get("concurrency", {}).get("fetch_delay_ms", 50) / 1000.0
                     if delay > 0:
                         time.sleep(delay)
 
             for future in as_completed(futures_map):
-                # 检查是否收到中断信号
                 if _executor_shutdown.is_set():
                     logger.warning("收到中断信号，取消剩余任务...")
                     for f in futures_map:
@@ -362,7 +496,7 @@ class MultiFactorEngine:
                     logger.debug(f"并发取数失败 {code}: {e}")
 
                 completed += 1
-                if completed % 100 == 0 or completed == total:
+                if completed % 500 == 0 or completed == total:
                     logger.info(f"  L4 进度: {completed}/{total}")
 
         except KeyboardInterrupt:
@@ -373,16 +507,14 @@ class MultiFactorEngine:
             raise
 
         finally:
-            # Ensure executor is always shutdown
             try:
                 executor.shutdown(wait=False, cancel_futures=True)
             except TypeError:
-                # Python <3.9 doesn't support cancel_futures
                 for f in list(futures_map.keys()):
                     f.cancel()
                 executor.shutdown(wait=False)
 
-        # Step 4: 计算综合评分
+        # === Step 6: 计算综合评分 ===
         scores_df = pd.DataFrame(factor_list)
         scores_df = self._calc_composite_score(scores_df, factors_cfg)
 
@@ -393,31 +525,43 @@ class MultiFactorEngine:
         return scores_df.reset_index(drop=True)
 
     def _calc_composite_score(self, df: pd.DataFrame, factors_cfg: list) -> pd.DataFrame:
-        """计算加权综合评分。"""
+        """计算加权综合评分。自动跳过缺失列并报告可用性。"""
         df = df.copy()
         df["composite_score"] = 0.0
 
+        # 诊断: 列出实际可用的因子列
+        available_cols = [c for c in df.columns if c not in ("code", "sector", "composite_score")]
+        configured_names = [f["name"] for f in factors_cfg]
+        missing = [n for n in configured_names if n not in df.columns]
+        matched = [n for n in configured_names if n in df.columns]
+        logger.info(f"  L4 因子诊断: 配置={len(configured_names)}个, 可用={len(available_cols)}列, "
+                    f"命中={len(matched)}个, 缺失={missing}")
+
+        total_weight = 0.0
         for factor in factors_cfg:
             name = factor["name"]
             weight = factor["weight"]
             direction = factor.get("direction", "descending")
 
             if name not in df.columns:
-                logger.warning(f"因子 {name} 不在数据中，跳过")
+                logger.warning(f"  因子 '{name}' 不在数据中（权重 {weight} 丢失）")
                 continue
 
             # 处理缺失值
             col = df[name].copy()
             col = col.replace([np.inf, -np.inf], np.nan)
 
+            # 检查是否全为默认值（全零数据无区分度，跳过）
+            col_valid = col.dropna()
+            if len(col_valid) == 0 or col_valid.nunique() <= 1:
+                logger.debug(f"  因子 '{name}' 无变化（全 {col_valid.iloc[0] if len(col_valid) > 0 else 'NaN'}），跳过")
+                continue
+
             if direction == "ascending":
-                # 越低越好 → 排名反转
                 rank = col.rank(method="min", ascending=True, na_option="bottom")
             else:
-                # 越高越好
                 rank = col.rank(method="min", ascending=False, na_option="bottom")
 
-            # 归一化到 0-100
             max_rank = rank.max()
             if max_rank > 0:
                 normalized = (rank / max_rank) * 100
@@ -425,9 +569,22 @@ class MultiFactorEngine:
                 normalized = pd.Series(50, index=rank.index)
 
             df["composite_score"] += normalized * weight
-            logger.debug(f"  因子 {name}: weight={weight}, direction={direction}")
+            total_weight += weight
+            logger.debug(f"  因子 {name}: weight={weight}, direction={direction}, "
+                        f"有效值={len(col_valid)}")
+
+        # 归一化: 按有效权重等比缩放
+        if total_weight > 0 and total_weight < 1.0:
+            df["composite_score"] = df["composite_score"] / total_weight
+            logger.info(f"  L4 有效总权重: {total_weight:.2f}, 评分已等比缩放")
 
         df["composite_score"] = df["composite_score"].round(2)
+
+        # 诊断: 输出评分分布
+        if len(df) > 0:
+            scores = df["composite_score"]
+            logger.info(f"  L4 评分分布: min={scores.min():.1f}, max={scores.max():.1f}, "
+                        f"mean={scores.mean():.1f}, median={scores.median():.1f}")
         return df
 
     # ========================================
@@ -451,7 +608,7 @@ class MultiFactorEngine:
         if len(candidates) == 0:
             return pd.DataFrame()
 
-        codes = candidates["code"].tolist() if "code" in candidates.columns else []
+        codes = [str(c).zfill(6) for c in (candidates["code"].tolist() if "code" in candidates.columns else [])]
         rebound_picks = []
 
         for code in codes:
@@ -551,6 +708,31 @@ class MultiFactorEngine:
             "③C_观察名单": watchlist,
         }
 
+    def _get_local_stock_list(self) -> Optional[pd.DataFrame]:
+        """
+        从 market.db 本地快照构建股票列表（网络不可用时的降级方案）。
+        快照已包含: code, name, sector, close, pe, pb, market_cap, change_pct 等。
+        """
+        try:
+            df = self._load_local_snapshot()
+        except Exception as e:
+            logger.warning(f"加载本地快照异常: {type(e).__name__}: {e}")
+            return None
+        
+        if df is None or len(df) == 0:
+            logger.warning("本地快照为空，降级失败")
+            return None
+        
+        # 检查并报告可用列
+        required = ["code", "name", "close", "pe", "pb", "market_cap"]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            logger.warning(f"本地快照缺少必选列: {missing}，可用列: {list(df.columns)[:15]}...")
+            return None
+        
+        logger.info(f"使用本地快照作为股票列表: {len(df)} 只（离线模式），列: {list(df.columns)[:10]}...")
+        return df
+
     # ========================================
     #  主运行入口
     # ========================================
@@ -570,13 +752,17 @@ class MultiFactorEngine:
         # L0: 市场环境判断
         regime_info = self.assess_regime()
 
-        # 获取全A股列表
+        # 获取全A股列表（网络 → 本地快照降级）
+        stock_list = None
         try:
             stock_list = self.cli.get_stock_list()
             logger.info(f"获取股票列表: {len(stock_list)} 只")
         except Exception as e:
-            logger.error(f"获取股票列表失败: {e}")
-            return {"error": str(e), "regime": regime_info}
+            logger.warning(f"网络股票列表失败: {e}，尝试本地快照降级...")
+            stock_list = self._get_local_stock_list()
+
+        if stock_list is None or len(stock_list) == 0:
+            return {"error": "股票列表获取失败（网络和本地快照均不可用）", "regime": regime_info}
 
         # L2: 基础过滤
         filtered = self.filter_l2(stock_list)

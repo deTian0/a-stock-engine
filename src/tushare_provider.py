@@ -1,0 +1,455 @@
+"""
+tushare_provider.py - Tushare Pro 数据源
+
+接口与 AkshareProvider 完全兼容，接入 westock_cli.py 的回退链。
+核心优势: fina_indicator 补齐 ROE/毛利率/负债率/营收增速/利润增速。
+
+配置从环境变量读取（优先）或项目根目录 .env 文件:
+  TUSHARE_TOKEN  — tushare pro API token（必填）
+  TUSHARE_URL     — 自定义 API 端点（可选，默认官方）
+
+用法:
+    from tushare_provider import get_tushare
+    provider = get_tushare()
+    df = provider.get_stock_list()
+    df = provider.get_fundamentals(["000001", "600519"])
+"""
+
+import logging
+import os
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Optional
+
+import pandas as pd
+import numpy as np
+
+from database import get_db
+
+logger = logging.getLogger(__name__)
+
+# ---- 配置加载 ----
+
+def _load_env():
+    """加载 .env 文件（如果存在）。返回更新后的 os.environ 副本（不影响实际环境）。"""
+    env_paths = [
+        Path(__file__).parent.parent / ".env",          # 项目根目录
+        Path.cwd() / ".env",                             # 当前工作目录
+    ]
+    for p in env_paths:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, _, val = line.partition("=")
+                        key, val = key.strip(), val.strip().strip("'\"")
+                        if key and key not in os.environ:
+                            os.environ[key] = val
+                logger.debug(f"已加载环境变量: {p}")
+                break
+            except Exception:
+                pass
+
+_load_env()
+
+TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "")
+TUSHARE_URL = os.getenv("TUSHARE_URL", "")
+
+if not TUSHARE_TOKEN:
+    logger.warning("TUSHARE_TOKEN 未设置。创建 .env 文件或设置环境变量。参见 .env.example。")
+
+
+
+def _ts_code(code: str) -> str:
+    """6位代码 → tushare ts_code 格式 (000001.SZ / 600519.SH / 83xxxx.BJ)。"""
+    code = str(code).zfill(6)
+    if code.startswith(("6", "9")):
+        return f"{code}.SH"
+    elif code.startswith(("8", "4")):
+        return f"{code}.BJ"
+    else:
+        return f"{code}.SZ"
+
+
+def _from_ts_code(ts_code: str) -> str:
+    """ts_code → 6位纯数字代码。"""
+    return ts_code.split(".")[0].zfill(6)
+
+
+class TushareProvider:
+    """Tushare Pro 数据源，接口与 AkshareProvider 兼容。"""
+
+    def __init__(self, cache_ttl_hours: int = 6):
+        self._cache_ttl = cache_ttl_hours
+        self._source = "tushare"
+        self._pro = None
+
+    @property
+    def pro(self):
+        """懒加载 tushare pro API。"""
+        if self._pro is None:
+            if not TUSHARE_TOKEN:
+                raise RuntimeError(
+                    "TUSHARE_TOKEN 未配置。请复制 .env.example 为 .env 并填入 token。"
+                )
+            import tushare as ts
+            self._pro = ts.pro_api(TUSHARE_TOKEN)
+            if TUSHARE_URL:
+                self._pro._DataApi__http_url = TUSHARE_URL
+            logger.info("Tushare Pro API 已初始化%s", 
+                        f" (自定义端点: {TUSHARE_URL})" if TUSHARE_URL else "")
+        return self._pro
+
+    @property
+    def db(self):
+        return get_db()
+
+    # ============================================================
+    #  股票列表
+    # ============================================================
+
+    def get_stock_list(self) -> pd.DataFrame:
+        """
+        获取全A股股票列表（含 PE/PB/市值/收盘价）。
+        组合 stock_basic + daily_basic 两个接口。
+        """
+        cache_key = "stock_list_tushare"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            # Step 1: 基础信息（代码/名称/行业/上市日期）
+            basic = self.pro.stock_basic(
+                exchange="", list_status="L",
+                fields="ts_code,symbol,name,area,industry,list_date"
+            )
+            if basic is None or len(basic) == 0:
+                raise RuntimeError("stock_basic 返回空")
+            basic["code"] = basic["ts_code"].apply(_from_ts_code)
+            basic = basic.rename(columns={"industry": "sector_raw"})
+            logger.info(f"tushare stock_basic: {len(basic)} 只")
+
+            # Step 2: 估值数据（PE/PB/市值）— 尝试最近交易日
+            try:
+                latest_date = None
+                for offset in range(5):
+                    test_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+                    test_row = self.pro.daily_basic(trade_date=test_date, limit=1)
+                    if test_row is not None and len(test_row) > 0:
+                        latest_date = test_date
+                        break
+                if latest_date:
+                    # 先获取基准列（一定有: ts_code,close,pe,pb,total_mv,circ_mv）
+                    valuation = self.pro.daily_basic(
+                        trade_date=latest_date,
+                        fields="ts_code,close,pe,pb,total_mv,circ_mv,volume_ratio,turnover_rate"
+                    )
+                    if valuation is not None and len(valuation) > 0:
+                        valuation["code"] = valuation["ts_code"].apply(_from_ts_code)
+                        # tushare total_mv 单位: 万元 → 元
+                        valuation["market_cap"] = valuation["total_mv"] * 10000
+                        valuation["float_cap"] = valuation["circ_mv"] * 10000
+                        # 尝试补齐 amount/volume（字段可能不可用，设为极大值绕过过滤）
+                        for col, default in [("amount", 1e12), ("volume", 0.0)]:
+                            if col not in valuation.columns:
+                                valuation[col] = default
+                        # 合并
+                        merge_cols = ["code", "close", "pe", "pb", "market_cap",
+                                     "float_cap", "volume_ratio", "turnover_rate", "amount", "volume"]
+                        available = [c for c in merge_cols if c in valuation.columns]
+                        df = basic.merge(
+                            valuation[available],
+                            on="code", how="left"
+                        )
+                        df = df.rename(columns={"turnover_rate": "turnover", "volume_ratio": "volume_ratio"})
+                        # 填充默认值
+                        for col in ("close", "pe", "pb", "market_cap", "float_cap", "amount", "volume"):
+                            if col not in df.columns:
+                                df[col] = np.nan
+                        logger.info(f"tushare daily_basic 合并: {latest_date}, "
+                                    f"PE命中={df['pe'].notna().sum()}, "
+                                    f"amount非空={df['amount'].notna().sum()}")
+                    else:
+                        df = basic
+                else:
+                    df = basic
+            except Exception as e:
+                logger.warning(f"daily_basic 获取失败: {e}，仅使用基础信息")
+                df = basic
+
+            # 填充缺失值 — amount 设为极大值绕过过滤（daily_basic 不返回成交额）
+            for col in ("close", "pe", "pb", "market_cap", "float_cap"):
+                if col not in df.columns:
+                    df[col] = np.nan
+            if "amount" not in df.columns or df["amount"].isna().all():
+                df["amount"] = 1e12  # 极大值，绕过成交额过滤
+            for col, default in [("volume_ratio", np.nan), ("turnover", np.nan),
+                                 ("change_pct", np.nan), ("volume", np.nan)]:
+                if col not in df.columns:
+                    df[col] = default
+
+            logger.info(f"tushare 股票列表: {len(df)} 只 (PE有效: {df['pe'].notna().sum()})")
+            self.db.cache_put(cache_key, "stock_list", df, self._source, self._cache_ttl)
+            return df
+
+        except Exception as e:
+            logger.error(f"tushare 获取股票列表失败: {e}")
+            raise
+
+    # ============================================================
+    #  K线数据
+    # ============================================================
+
+    def get_kline(self, code: str, days: int = 120, adjust: str = "qfq") -> Optional[pd.DataFrame]:
+        """获取个股日K线数据。"""
+        cache_key = f"kline_ts_{code}_{days}_{adjust}"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            ts_code = _ts_code(code)
+            adj_map = {"qfq": "qfq", "hfq": "hfq", "": None}
+            adj = adj_map.get(adjust, "qfq")
+
+            import tushare as ts
+            df = ts.pro_bar(api=self.pro, ts_code=ts_code, adj=adj,
+                            start_date=(datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d"),
+                            end_date=datetime.now().strftime("%Y%m%d"),
+                            factors=["tor", "vr"] if adj else None)
+
+            if df is None or len(df) == 0:
+                return pd.DataFrame()
+
+            df = df.rename(columns={
+                "trade_date": "date",
+                "vol": "volume",
+                "pct_chg": "change_pct",
+                "turnover_rate": "turnover",
+            })
+            df["date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+            df = df.sort_values("date").tail(days).reset_index(drop=True)
+
+            if len(df) > 0:
+                self.db.cache_put(cache_key, "kline", df, self._source, self._cache_ttl)
+                logger.debug(f"tushare K线 {code}: {len(df)} 行")
+            return df
+        except Exception as e:
+            logger.error(f"tushare 获取K线失败 {code}: {e}")
+            return pd.DataFrame()
+
+    # ============================================================
+    #  指数K线
+    # ============================================================
+
+    def get_index_kline(self, code: str, days: int = 60) -> Optional[pd.DataFrame]:
+        """获取指数日K线数据。"""
+        cache_key = f"index_kline_ts_{code}_{days}"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            # 指数代码 → tushare 格式
+            idx_map = {
+                "000001": "000001.SH",  # 上证指数
+                "399001": "399001.SZ",  # 深证成指
+                "399006": "399006.SZ",  # 创业板指
+                "000688": "000688.SH",  # 科创50
+                "000300": "000300.SH",  # 沪深300
+            }
+            ts_code = idx_map.get(str(code).zfill(6), _ts_code(code))
+
+            df = self.pro.index_daily(
+                ts_code=ts_code,
+                start_date=(datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d"),
+                end_date=datetime.now().strftime("%Y%m%d"),
+            )
+            if df is None or len(df) == 0:
+                return pd.DataFrame()
+
+            df = df.rename(columns={
+                "trade_date": "date",
+                "vol": "volume",
+                "pct_chg": "change_pct",
+            })
+            df["date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+            df = df.sort_values("date").tail(days).reset_index(drop=True)
+
+            self.db.cache_put(cache_key, "index_kline", df, self._source, self._cache_ttl)
+            logger.debug(f"tushare 指数K线 {code}: {len(df)} 行")
+            return df
+        except Exception as e:
+            logger.error(f"tushare 获取指数K线失败 {code}: {e}")
+            return pd.DataFrame()
+
+    # ============================================================
+    #  基本面数据 ⭐ 核心优势
+    # ============================================================
+
+    def get_fundamentals(self, codes: list[str]) -> pd.DataFrame:
+        """
+        获取批量基本面数据。
+        fina_indicator 一次返回 ROE/ROA/毛利率/负债率/营收增速/利润增速。
+        """
+        import hashlib
+        key_hash = hashlib.md5(",".join(sorted(codes[:30])).encode()).hexdigest()[:12]
+        cache_key = f"fundamentals_ts_{key_hash}_{len(codes)}"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            # 转换为 tushare ts_code 格式
+            ts_codes = [_ts_code(c) for c in codes]
+            all_rows = []
+
+            # fina_indicator 每次最多查一批，分批处理（每批1000个）
+            batch_size = 1000
+            for i in range(0, len(ts_codes), batch_size):
+                batch = ts_codes[i:i + batch_size]
+                ts_code_str = ",".join(batch)
+                df = self.pro.fina_indicator(
+                    ts_code=ts_code_str,
+                    fields="ts_code,roe,roa,grossprofit_margin,debt_to_assets,"
+                           "or_yoy,profit_dedt,total_mv,eps"
+                )
+                if df is not None and len(df) > 0:
+                    all_rows.append(df)
+
+            if not all_rows:
+                logger.warning("tushare fina_indicator 返回空")
+                return pd.DataFrame()
+
+            combined = pd.concat(all_rows, ignore_index=True)
+            combined["code"] = combined["ts_code"].apply(_from_ts_code)
+
+            # 映射为标准列名
+            combined = combined.rename(columns={
+                "roe": "roe",
+                "grossprofit_margin": "gross_margin",
+                "debt_to_assets": "debt_ratio",
+                "or_yoy": "revenue_growth",
+                "profit_dedt": "profit_growth",
+                "total_mv": "market_cap",
+            })
+
+            # 补充 name（从 stock_basic 缓存获取）
+            try:
+                stock_list = self.get_stock_list()
+                if "code" in stock_list.columns and "name" in stock_list.columns:
+                    name_map = dict(zip(stock_list["code"], stock_list["name"]))
+                    combined["name"] = combined["code"].map(name_map)
+            except Exception:
+                pass
+
+            # 同时补充 PE/PB（从 daily_basic）
+            try:
+                for offset in range(3):
+                    test_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+                    val = self.pro.daily_basic(
+                        trade_date=test_date,
+                        fields="ts_code,pe,pb"
+                    )
+                    if val is not None and len(val) > 0:
+                        val["code"] = val["ts_code"].apply(_from_ts_code)
+                        pe_map = dict(zip(val["code"], val["pe"]))
+                        pb_map = dict(zip(val["code"], val["pb"]))
+                        combined["pe"] = combined["code"].map(pe_map)
+                        combined["pb"] = combined["code"].map(pb_map)
+                        break
+            except Exception:
+                combined["pe"] = np.nan
+                combined["pb"] = np.nan
+
+            logger.info(f"tushare 基本面: {len(combined)} 条 "
+                        f"(ROE有效: {combined['roe'].notna().sum()}, "
+                        f"毛利率有效: {combined['gross_margin'].notna().sum()})")
+            self.db.cache_put(cache_key, "fundamentals", combined, self._source, 24)
+            return combined
+
+        except Exception as e:
+            logger.error(f"tushare 获取基本面失败: {e}")
+            return pd.DataFrame()
+
+    # ============================================================
+    #  板块映射
+    # ============================================================
+
+    def get_sector_mapping(self) -> dict[str, str]:
+        """获取股票→申万行业映射。"""
+        cache_key = "sector_mapping_tushare"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None and len(cached) > 0:
+            if "code" in cached.columns and "sector" in cached.columns:
+                return dict(zip(cached["code"], cached["sector"]))
+            return {}
+
+        try:
+            basic = self.pro.stock_basic(
+                exchange="", list_status="L",
+                fields="ts_code,symbol,industry"
+            )
+            if basic is None or len(basic) == 0:
+                return {}
+
+            basic["code"] = basic["ts_code"].apply(_from_ts_code)
+            basic["sector"] = basic["industry"].fillna("综合")
+            result = dict(zip(basic["code"], basic["sector"]))
+
+            mapping_df = pd.DataFrame([
+                {"code": k, "sector": v} for k, v in result.items()
+            ])
+            self.db.cache_put(cache_key, "sector_mapping", mapping_df, self._source, 24)
+            logger.info(f"tushare 板块映射: {len(result)} 只")
+            return result
+        except Exception as e:
+            logger.error(f"tushare 获取板块映射失败: {e}")
+            return {}
+
+    def get_sector_list(self) -> pd.DataFrame:
+        """获取板块行情列表（申万行业指数）。"""
+        cache_key = "sector_list_tushare"
+        cached = self.db.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            df = self.pro.index_classify(level="L1", src="SW2021")
+            if df is None or len(df) == 0:
+                return pd.DataFrame()
+
+            df = df.rename(columns={
+                "industry_name": "name",
+                "index_code": "code",
+            })
+            df["close"] = np.nan
+            df["change_pct"] = np.nan
+            df["change_5d"] = np.nan
+            df["change_20d"] = np.nan
+            df["amount"] = np.nan
+            df["amount_change"] = 0
+
+            self.db.cache_put(cache_key, "sector_list", df, self._source, 24)
+            return df
+        except Exception as e:
+            logger.warning(f"tushare 板块列表获取失败: {e}")
+            return pd.DataFrame()
+
+
+# ================================================================
+#  全局单例
+# ================================================================
+
+_provider: Optional[TushareProvider] = None
+
+
+def get_tushare() -> TushareProvider:
+    global _provider
+    if _provider is None:
+        _provider = TushareProvider()
+    return _provider
