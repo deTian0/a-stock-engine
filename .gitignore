@@ -17,8 +17,11 @@ data_cache.rar
 *.json
 !config/config.yaml
 
-# Briefs (daily outputs)
+# Briefs — migrated to history/ (tracked by git)
 briefs/
+
+# History (daily reports + tracking — committed to git)
+!history/
 
 # IDE
 .idea/

@@ -273,7 +273,7 @@ def main():
 
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")
-        save_dir = Path("briefs") / today
+        save_dir = Path("history") / today
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / "盘后复盘报告.md"
         save_path.write_text(content, encoding="utf-8")

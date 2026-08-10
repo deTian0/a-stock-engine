@@ -26,12 +26,14 @@ from typing import Optional
 import pandas as pd
 
 from database import get_db
+from database import StockDB
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 CYCLE_TRADING_DAYS = 10
 CYCLE_CALENDAR_DAYS = 14  # 10个交易日 ≈ 14个自然日
+TRACKING_DB = str(Path(__file__).parent.parent / "history" / "picks.db")
 
 
 def _init_tracking_schema(db):
@@ -94,7 +96,8 @@ class PickTracker:
     """选股命中追踪器。"""
 
     def __init__(self):
-        self.db = get_db()
+        self.db = StockDB(TRACKING_DB)
+        Path(TRACKING_DB).parent.mkdir(parents=True, exist_ok=True)
         _init_tracking_schema(self.db)
 
     def track_picks(self, df: pd.DataFrame, session_type: str,

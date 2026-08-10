@@ -89,7 +89,7 @@ factor_l4:
 
 # --- 输出配置 ---
 output:
-  brief_dir: "briefs"             # 简报输出目录
+  brief_dir: "history"             # 简报输出目录 (git 追踪, 数据不丢失)
   brief_filename: "盘前选股简报.md"
   date_based_archive: true        # 按日期分目录存档（避免覆盖）
   quality_top_n: 10               # ②A质量榜数量
