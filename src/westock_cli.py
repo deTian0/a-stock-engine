@@ -76,6 +76,39 @@ def _parse_pipe_table(output: str) -> list[dict]:
     return rows
 
 
+_DATE_COLS = {"date", "time", "datetime", "timestamp", "trading_date"}
+
+
+def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将 westock pipe 表格解析出的字符串列转换为数值类型。
+
+    westock 输出为纯文本表格，所有数值（close/open/high/volume 等）解析后
+    都是字符串类型（pandas 3.x 下为 str/StringDtype）；若直接对字符串列做
+    .mean()/.rolling() 会抛 "Cannot perform reduction 'mean' with string dtype"。
+
+    策略：对每个非数值、非日期列尝试 pd.to_numeric(errors="coerce")，仅当该列
+    **所有非空值**都能成功转为数值时才替换；否则视为日期/名称类文本，保留原样。
+    注意 pandas 3.x 已移除 errors="ignore"。
+    """
+    for col in df.columns:
+        if col.lower() in _DATE_COLS:
+            continue
+        if str(df[col].dtype).startswith(("int", "float")):
+            continue
+        nonnull = df[col].notna()
+        if not nonnull.any():
+            continue
+        try:
+            converted = pd.to_numeric(df[col], errors="coerce")
+        except (ValueError, TypeError):
+            continue
+        # 只有「全部非空值都可解析」才认定该列是数值列
+        if converted.notna().sum() == int(nonnull.sum()):
+            df[col] = converted
+    return df
+
+
 def run_westock(args: list[str], timeout: int = 30, max_retries: int = 3) -> str:
     """
     调用 westock-data CLI 并返回 stdout 输出。
@@ -337,6 +370,7 @@ class WestockCLI:
             df = pd.DataFrame(cached)
             if "last" in df.columns and "close" not in df.columns:
                 df = df.rename(columns={"last": "close"})
+            df = _coerce_numeric(df)
             return df
 
         try:
@@ -351,6 +385,7 @@ class WestockCLI:
             if rows:
                 df = pd.DataFrame(rows)
                 df = df.rename(columns={"last": "close"})
+                df = _coerce_numeric(df)
                 self._write_cache(cache_key, df.to_dict(orient="records"))
                 return df
         except Exception as e:
@@ -372,6 +407,7 @@ class WestockCLI:
             df = pd.DataFrame(cached)
             if "last" in df.columns and "close" not in df.columns:
                 df = df.rename(columns={"last": "close"})
+            df = _coerce_numeric(df)
             return df
 
         try:
@@ -384,6 +420,7 @@ class WestockCLI:
             if rows:
                 df = pd.DataFrame(rows)
                 df = df.rename(columns={"last": "close"})  # westock → 系统标准列名
+                df = _coerce_numeric(df)
                 self._write_cache(cache_key, df.to_dict(orient="records"))
                 return df
         except Exception as e:
