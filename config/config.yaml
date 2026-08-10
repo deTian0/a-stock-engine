@@ -5,13 +5,14 @@
 # --- 账户配置 ---
 account:
   available_cash: 50000          # 可用资金（元）
+  total_assets: 9403.91          # 总资产（华宝证券）
   max_position_ratio: 0.80       # 最大仓位比例
   max_single_stock: 0.10         # 单只股票最大占比
-  holdings:                       # 当前持仓列表
+  holdings:                       # 当前持仓（来自华宝证券）
     # 格式: code: {name, shares, cost_price}
-    # 示例:
-    # "601318": {name: "中国平安", shares: 200, cost_price: 45.30}
-    # "002027": {name: "分众传媒", shares: 500, cost_price: 6.80}
+    # 一手 = 100股，最小买入数 = 1手
+    "159852": {name: "软件ETF嘉实", shares: 1400, cost_price: 0.725}
+    "159869": {name: "游戏ETF华夏", shares: 3700, cost_price: 1.142}
 
 # --- 市场环境判断 (L0) ---
 env_regime:
