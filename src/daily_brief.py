@@ -46,9 +46,12 @@ def generate_brief(results: dict, config: dict) -> str:
         if n is None or str(n).lower() in ("nan", "", "none"):
             return code
         return n
+
+    def _fmt_pct(val, default="-"):
         """安全格式化百分比。"""
         if val is None or not pd.notna(val):
             return default
+        return f"{val:.1f}%"
         return f"{val:.1f}%"
 
     def _net_return(score, cost=stock_cost):
