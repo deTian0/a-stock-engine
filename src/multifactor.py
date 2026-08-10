@@ -457,7 +457,23 @@ class MultiFactorEngine:
         # === Step 4: 预加载板块映射 ===
         sector_map = self.sector_mapping
 
-        # === Step 5: 并发获取数据（无 CLI 动量调用时更快） ===
+        # === Step 5: 从候选人补齐缺失名称（tushare fina_indicator 不含名称） ===
+        if "code" in candidates.columns and "name" in candidates.columns:
+            name_map = {}
+            for _, r in candidates.iterrows():
+                n = r.get("name", "")
+                if n and str(n).lower() not in ("nan", "none", ""):
+                    name_map[str(r["code"]).zfill(6)] = n
+            fixed = 0
+            for code, info in fund_lookup.items():
+                n = info.get("name", "")
+                if not n or str(n).lower() in ("nan", "none", ""):
+                    info["name"] = name_map.get(str(code).zfill(6), code)
+                    fixed += 1
+            if fixed > 0:
+                logger.debug(f"  L4 名称补齐: {fixed} 只")
+
+        # === Step 6: 并发获取数据（无 CLI 动量调用时更快） ===
         max_workers = min(self.config.get("concurrency", {}).get("max_workers", 4), total)
         logger.info(f"  并发组装因子: {max_workers} workers, {total} 只股票...")
 
