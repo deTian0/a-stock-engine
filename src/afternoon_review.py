@@ -40,79 +40,80 @@ def review_sectors(cli, price_loader) -> str:
     lines.append(f"> 生成时间: {datetime.now().strftime('%H:%M')}\n")
 
     # ============================================================
-    # 1. 最强板块
+    # 1. 最强板块 — 用股票列表按行业聚合
     # ============================================================
     lines.append("## 一、今日最强板块 Top 5\n")
+
+    # 获取全市场数据（含涨跌幅 + 板块映射）
     try:
-        sector_list = cli.get_sector_list()
+        stock_list = cli.get_stock_list()
     except Exception:
-        sector_list = pd.DataFrame()
-
-    if len(sector_list) > 0:
-        # 按涨跌幅排序
-        if "change_pct" in sector_list.columns:
-            top_sectors = sector_list.nlargest(5, "change_pct")
-        else:
-            top_sectors = sector_list.head(5)
-
-        lines.append("| 板块 | 涨幅 | 成交额(亿) | 5日涨幅 | 资金趋势 |")
-        lines.append("|------|------|-----------|---------|----------|")
-        for _, row in top_sectors.iterrows():
-            name = row.get("name", row.get("sector_name", "-"))
-            chg = f"{row.get('change_pct', 0):.1f}%" if pd.notna(row.get("change_pct")) else "-"
-            amt = f"{row.get('amount', 0)/1e8:.1f}" if row.get("amount") else "-"
-            chg5 = f"{row.get('change_5d', 0):.1f}%" if pd.notna(row.get("change_5d")) else "-"
-            # 资金趋势: 对比成交额变化
-            amt_chg_val = row.get("amount_change", 0)
-            trend = "📈 放量" if amt_chg_val > 0 else ("📉 缩量" if amt_chg_val < 0 else "→ 持平")
-            lines.append(f"| {name} | {chg} | {amt} | {chg5} | {trend} |")
-    else:
-        lines.append("_板块数据暂不可用_\n")
-
-    # ============================================================
-    # 2. 板块内最强个股
-    # ============================================================
-    lines.append("\n## 二、各板块最强个股\n")
-    top_sector_names = []
-    if len(sector_list) > 0 and "name" in sector_list.columns:
-        top_sector_names = sector_list.nlargest(5, "change_pct")["name"].tolist()
+        stock_list = pd.DataFrame()
 
     sector_mapping = {}
+    sector_stocks = {}
     try:
         sector_mapping = cli.get_sector_mapping()
     except Exception:
         pass
 
-    # 获取全市场涨跌幅（用于板块内筛选）
-    try:
-        all_stocks = cli.get_stock_list()
-    except Exception:
-        all_stocks = pd.DataFrame()
+    # 按行业聚合: 平均涨幅、总成交额
+    if len(stock_list) > 0 and "code" in stock_list.columns:
+        stock_list["sector"] = stock_list["code"].map(sector_mapping).fillna("综合")
+        sector_agg = stock_list.groupby("sector").agg(
+            avg_chg=("change_pct", "mean"),
+            total_amt=("amount", "sum"),
+            stock_count=("code", "count"),
+            max_chg=("change_pct", "max"),
+        ).reset_index()
+        sector_agg = sector_agg[sector_agg["stock_count"] >= 3]  # 至少3只股票
+        top_sectors = sector_agg.nlargest(5, "avg_chg")
+
+        lines.append("| 板块 | 平均涨幅 | 股票数 | 龙头涨幅 | 成交额(亿) |")
+        lines.append("|------|---------|--------|---------|-----------|")
+        for _, row in top_sectors.iterrows():
+            name = row["sector"]
+            avg = f"{row['avg_chg']:.1f}%" if pd.notna(row["avg_chg"]) else "-"
+            cnt = int(row["stock_count"])
+            top = f"{row['max_chg']:.1f}%" if pd.notna(row["max_chg"]) else "-"
+            amt = f"{row['total_amt']/1e8:.0f}" if pd.notna(row.get("total_amt")) else "-"
+            lines.append(f"| {name} | {avg} | {cnt} | {top} | {amt} |")
+    else:
+        lines.append("_板块数据暂不可用_\n")
+        top_sector_names = []
+        stock_list = pd.DataFrame()
+    else:
+        top_sector_names = top_sectors["sector"].tolist()
+    
+    # ============================================================
+    # 2. 板块内最强个股
+    # ============================================================
+    lines.append("\n## 二、各板块最强个股\n")
 
     for sector_name in top_sector_names[:5]:
         lines.append(f"\n### {sector_name}\n")
-        # 找出该板块的股票
-        sector_codes = [c for c, s in sector_mapping.items() if s == sector_name]
-
-        if len(sector_codes) > 0 and len(all_stocks) > 0:
-            sector_stocks = all_stocks[all_stocks["code"].isin(sector_codes)]
-            if len(sector_stocks) > 0 and "change_pct" in sector_stocks.columns:
-                top = sector_stocks.nlargest(5, "change_pct")
-                lines.append("| 代码 | 名称 | 涨幅 | 量比 | 成交额(亿) | 动因分析 |")
-                lines.append("|------|------|------|------|-----------|----------|")
-                for _, row in top.iterrows():
-                    code = row.get("code", "")
-                    name = row.get("name", code)
-                    chg = f"{row.get('change_pct', 0):.1f}%" if pd.notna(row.get("change_pct")) else "-"
-                    vol_r = f"{row.get('volume_ratio', 0):.2f}" if pd.notna(row.get("volume_ratio")) else "-"
-                    amt = f"{row.get('amount', 0)/1e8:.1f}" if pd.notna(row.get("amount", 0)) else "-"
-                    # 动因分析
-                    causes = _analyze_cause(row, price_loader, code)
-                    lines.append(f"| {code} | {name} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
-            else:
-                lines.append("_该板块个股数据不足_\n")
+        if "sector" in stock_list.columns:
+            sector_df = stock_list[stock_list["sector"] == sector_name]
         else:
-            lines.append("_板块映射不可用_\n")
+            codes = [c for c, s in sector_mapping.items() if s == sector_name]
+            sector_df = stock_list[stock_list["code"].isin(codes)] if "code" in stock_list.columns else pd.DataFrame()
+
+        if len(sector_df) > 0 and "change_pct" in sector_df.columns:
+            top = sector_df.nlargest(5, "change_pct")
+            lines.append("| 代码 | 名称 | 涨幅 | 量比 | 成交额(亿) | 动因 |")
+            lines.append("|------|------|------|------|-----------|------|")
+            for _, row in top.iterrows():
+                code = str(row.get("code", ""))
+                name = str(row.get("name", code))
+                if name.lower() in ("nan", "none", ""):
+                    name = code
+                chg = f"{row.get('change_pct', 0):.1f}%" if pd.notna(row.get("change_pct")) else "-"
+                vol_r = f"{row.get('volume_ratio', 0):.2f}" if pd.notna(row.get("volume_ratio")) else "-"
+                amt = f"{row.get('amount', 0)/1e8:.1f}" if pd.notna(row.get("amount")) else "-"
+                causes = _analyze_cause(row, price_loader, code)
+                lines.append(f"| {code} | {name} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
+        else:
+            lines.append("_个股数据不足_\n")
 
     # ============================================================
     # 3. 早盘推荐验证
