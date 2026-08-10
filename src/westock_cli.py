@@ -347,6 +347,7 @@ class WestockCLI:
             rows = _parse_pipe_table(output)
             if rows:
                 df = pd.DataFrame(rows)
+                df = df.rename(columns={"last": "close"})
                 self._write_cache(cache_key, df.to_dict(orient="records"))
                 return df
         except Exception as e:
@@ -376,6 +377,7 @@ class WestockCLI:
             rows = _parse_pipe_table(output)
             if rows:
                 df = pd.DataFrame(rows)
+                df = df.rename(columns={"last": "close"})  # westock → 系统标准列名
                 self._write_cache(cache_key, df.to_dict(orient="records"))
                 return df
         except Exception as e:
