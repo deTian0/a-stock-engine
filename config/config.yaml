@@ -9,7 +9,7 @@ system:
 
 # --- 账户配置 ---
 account:
-  available_cash: 50000          # 可用资金（元）
+  available_cash: 20000          # 可用资金（元）
   total_assets: 9403.91          # 总资产（华宝证券）
   max_position_ratio: 0.80       # 最大仓位比例
   max_single_stock: 0.10         # 单只股票最大占比
