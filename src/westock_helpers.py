@@ -99,7 +99,8 @@ def batch_tech_indicators(codes: list[str]) -> dict[str, dict]:
             r = subprocess.run(
                 [_NPX, "-y", "westock-data-skillhub@1.0.5",
                  "technical", ws_codes, "--indicator", "ma,macd,rsi"],
-                capture_output=True, text=True, timeout=60
+                capture_output=True, text=True, timeout=60,
+                encoding=_ENCODING, errors="replace"
             )
             if r.returncode != 0 or not r.stdout:
                 continue
