@@ -310,6 +310,18 @@ def main():
                 ignore_index=True
             )
             if len(all_picks) > 0:
+                # 补齐名称：从 L4 结果或 stock_list 中查找
+                l4 = results.get("l4_results", pd.DataFrame())
+                name_map = {}
+                for _, r in l4.iterrows():
+                    n = r.get("name", "")
+                    if n and str(n).lower() not in ("nan", "none", ""):
+                        name_map[str(r["code"]).zfill(6)] = n
+                # L4没找到的从 stock_list 补齐
+                if "name" in all_picks.columns:
+                    all_picks["name"] = all_picks.apply(
+                        lambda r: name_map.get(str(r["code"]).zfill(6), r["code"]), axis=1
+                    )
                 track_picks(all_picks, session_type=args.session)
         except Exception as e:
             logger.warning(f"命中追踪记录失败: {e}")

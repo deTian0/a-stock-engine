@@ -36,6 +36,13 @@ CYCLE_CALENDAR_DAYS = 14  # 10个交易日 ≈ 14个自然日
 TRACKING_DB = str(Path(__file__).parent.parent / "history" / "picks.db")
 
 
+def _clean_name(name, code):
+    """清洗名称：nan/空/None → 代码。"""
+    if name is None or str(name).lower() in ("nan", "none", ""):
+        return code
+    return str(name)
+
+
 def _init_tracking_schema(db):
     """初始化追踪相关表。"""
     c = db.conn
@@ -125,6 +132,7 @@ class PickTracker:
         new_count = 0
         for code, name in zip(codes, names):
             code = str(code).zfill(6)
+            name = _clean_name(name, code)
             try:
                 if self._track_one(code, name, session_type, pick_date):
                     new_count += 1
