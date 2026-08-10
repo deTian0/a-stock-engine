@@ -13,7 +13,12 @@ logger = logging.getLogger(__name__)
 
 # WorkBuddy 管理的 Node.js 路径
 _NODE_DIR = Path.home() / ".workbuddy" / "binaries" / "node" / "versions" / "22.22.2"
-_NPX = str(_NODE_DIR / "npx.exe") if (_NODE_DIR / "npx.exe").exists() else "npx"
+if (_NODE_DIR / "npx.cmd").exists():
+    _NPX = str(_NODE_DIR / "npx.cmd")
+elif (_NODE_DIR / "npx").exists():
+    _NPX = str(_NODE_DIR / "npx")
+else:
+    _NPX = "npx"
 
 
 def _to_ws(code: str) -> str:
