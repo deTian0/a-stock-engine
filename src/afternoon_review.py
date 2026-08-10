@@ -13,6 +13,7 @@ afternoon_review.py — 每日盘后复盘（15:30 执行）
 """
 
 import sys
+import os
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -43,31 +44,31 @@ def _fetch_change_pct_westock(codes: list[str]) -> dict[str, float]:
     
     try:
         result = subprocess.run(
-            ["npx", "-y", "westock-data-skillhub@1.0.5", "kline", ws_codes,
-             "--period", "day", "--limit", "2"],
-            capture_output=True, text=True, timeout=30, check=False
+            f'npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 2',
+            capture_output=True, text=True, timeout=30, check=False, shell=True
         )
         if result.returncode != 0 or not result.stdout:
             return {}
-        
-        # 解析 batch 输出: symbol | date | open | last | ... 
-        # 按符号排序，每个符号 2 行（今天 + 昨天）
+
+        # 解析 batch 输出: symbol | date | open | last | ...
         lines = result.stdout.strip().split("\n")
-        latest = {}
-        prev = {}
+        latest, prev = {}, {}
         for line in lines:
-            if not line or "|" not in line or line.startswith("[") or line.startswith("| symbol"):
+            if not line or "|" not in line or "[Batch]" in line or "symbol" in line:
                 continue
             parts = [p.strip() for p in line.split("|")]
-            if len(parts) < 6:
+            if len(parts) < 8:
                 continue
-            symbol = parts[1].strip().replace("sh","").replace("sz","").replace("bj","").zfill(6)
-            close = float(parts[4]) if len(parts) > 4 else 0
+            symbol = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
+            try:
+                close = float(parts[4])  # "last" column = 收盘价
+            except ValueError:
+                continue
             if symbol not in latest:
                 latest[symbol] = close
             elif symbol not in prev:
                 prev[symbol] = close
-        
+
         changes = {}
         for code, today in latest.items():
             yesterday = prev.get(code, today)
@@ -406,7 +407,7 @@ def main():
 
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")
-        save_dir = Path("briefs") / today
+        save_dir = Path("history") / today
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / "盘后复盘报告.md"
         save_path.write_text(content, encoding="utf-8")
