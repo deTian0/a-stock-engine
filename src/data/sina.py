@@ -22,6 +22,8 @@ import pandas as pd
 import numpy as np
 
 from data.db import get_db
+from data.db import get_market_db
+from data.cache import get_cache
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,10 @@ class SinaProvider:
     @property
     def db(self):
         return get_db()
+
+    @property
+    def cache(self):
+        return get_cache()
 
     def _get_base_codes(self) -> list[str]:
         """从现有数据库获取全A股代码列表。"""
