@@ -88,6 +88,96 @@ def batch_change_pct(codes: list[str]) -> dict[str, float]:
     return changes
 
 
+def batch_tech_indicators(codes: list[str]) -> dict[str, dict]:
+    """
+    批量获取技术指标: MA均线 + MACD + RSI。
+    返回 {code: {signal, strength, ma_signal, macd_signal, rsi_value, ...}}
+    """
+    result = {}
+    batch_size = 50  # technical 输出字段多，批次小一点
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i:i + batch_size]
+        ws_codes = ",".join(_to_ws(c) for c in batch)
+        try:
+            r = subprocess.run(
+                [_NPX, "-y", "westock-data-skillhub@1.0.5",
+                 "technical", ws_codes, "--indicator", "ma,macd,rsi"],
+                capture_output=True, text=True, timeout=60
+            )
+            if r.returncode != 0 or not r.stdout:
+                continue
+            for line in r.stdout.strip().split("\n"):
+                if "|" not in line or "code" in line or "Batch" in line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 15:
+                    continue
+                sym = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
+                try:
+                    close = float(parts[4])
+                    ma20 = float(parts[7]) if len(parts) > 7 and parts[7] else 0
+                    ma60 = float(parts[9]) if len(parts) > 9 and parts[9] else 0
+                    dif = float(parts[16]) if len(parts) > 16 and parts[16] else 0
+                    dea = float(parts[17]) if len(parts) > 17 and parts[17] else 0
+                    macd_bar = float(parts[18]) if len(parts) > 18 and parts[18] else 0
+                    rsi6 = float(parts[20]) if len(parts) > 20 and parts[20] else 50
+                except (ValueError, IndexError):
+                    continue
+
+                # 均线信号
+                ma_signals = []
+                if ma20 > 0:
+                    if close > ma20:
+                        ma_signals.append("站上MA20")
+                    else:
+                        ma_signals.append("跌破MA20")
+                if ma60 > 0:
+                    if close > ma60:
+                        ma_signals.append("多头")
+                    else:
+                        ma_signals.append("空头")
+
+                # MACD信号
+                if dif > dea:
+                    macd_sig = "金叉" if macd_bar > 0 else "收敛"
+                else:
+                    macd_sig = "死叉" if macd_bar < 0 else "发散"
+
+                # RSI信号
+                if rsi6 > 75:
+                    rsi_sig = "超买⚠️"
+                elif rsi6 < 25:
+                    rsi_sig = "超卖💡"
+                else:
+                    rsi_sig = "中性"
+
+                # 综合信号词
+                bullish = sum([1 for s in ma_signals if "站上" in s or "多头" in s]) + (1 if dif > dea else 0)
+                if bullish >= 2:
+                    signal = "🟢偏多"
+                elif bullish == 0:
+                    signal = "🔴偏空"
+                else:
+                    signal = "🟡震荡"
+
+                result[sym] = {
+                    "signal": signal,
+                    "ma": ",".join(ma_signals) if ma_signals else "-",
+                    "macd": macd_sig,
+                    "rsi": f"{rsi6:.0f}({rsi_sig})",
+                    "ma20": round(ma20, 2),
+                    "ma60": round(ma60, 2),
+                    "dif": round(dif, 2),
+                    "dea": round(dea, 2),
+                }
+        except Exception as e:
+            logger.warning(f"technical 批次失败: {e}")
+            continue
+
+    logger.info(f"技术指标: {len(result)}/{len(codes)} 只")
+    return result
+
+
 def batch_close_prices(codes: list[str]) -> dict[str, float]:
     """批量获取当日收盘价。返回 {code: close_price}。"""
     prices = batch_kline(codes, limit=1)

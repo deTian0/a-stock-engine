@@ -909,6 +909,32 @@ class MultiFactorEngine:
         except Exception as e:
             logger.debug(f"概念板块增强跳过: {e}")
 
+        # 补齐技术面信号（MA均线 + MACD + RSI）
+        try:
+            if len(l4_results) > 0 and "code" in l4_results.columns:
+                from westock_helpers import batch_tech_indicators, batch_close_prices
+                codes = l4_results["code"].astype(str).str.zfill(6).unique().tolist()
+                
+                # 技术指标
+                tech = batch_tech_indicators(codes)
+                if tech:
+                    for k in ["signal", "ma", "macd", "rsi"]:
+                        l4_results[f"tech_{k}"] = l4_results["code"].astype(str).str.zfill(6).map(
+                            lambda c, k=k: tech.get(c, {}).get(k, "-"))
+                    logger.info(f"技术面增强: {len(tech)} 只")
+                else:
+                    logger.warning("技术面获取失败，westock technical 不可用")
+                
+                # 当日股价
+                close_map = batch_close_prices(codes)
+                if close_map:
+                    l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
+                    l4_results["close"] = l4_results["code_str"].map(close_map)
+                    l4_results.drop(columns=["code_str"], inplace=True)
+                    logger.info(f"当日股价补齐: {l4_results['close'].notna().sum()}/{len(l4_results)} 只")
+        except Exception as e:
+            logger.warning(f"技术面/股价补齐异常: {e}")
+
         # 补齐当日股价（westock-data kline — tushare daily_basic 不含 close）
         try:
             if len(l4_results) > 0 and "code" in l4_results.columns:
