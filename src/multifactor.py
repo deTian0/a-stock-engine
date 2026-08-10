@@ -889,68 +889,9 @@ class MultiFactorEngine:
         # ETF 选股
         etf_picks = self.select_etfs()
 
-        # 概念板块归属增强
-        concept_stats = pd.DataFrame()
-        try:
-            from tushare_provider import get_tushare
-            ts = get_tushare()
-            concept_stats = ts.get_concept_stats()
-            if len(concept_stats) > 0 and len(l4_results) > 0:
-                # 合并：给 l4_results 每只股票加上最热概念
-                cs = concept_stats[["code", "concept_name", "concept_chg", "concept_amount"]]
-                l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
-                cs["code_str"] = cs["code"].astype(str).str.zfill(6)
-                l4_results = l4_results.merge(
-                    cs[["code_str", "concept_name", "concept_chg"]],
-                    on="code_str", how="left"
-                )
-                l4_results.drop(columns=["code_str"], inplace=True)
-                logger.info(f"概念板块增强: {l4_results['concept_name'].notna().sum()} 只")
-        except Exception as e:
-            logger.debug(f"概念板块增强跳过: {e}")
-
-        # 补齐技术面信号（MA均线 + MACD + RSI）
-        try:
-            if len(l4_results) > 0 and "code" in l4_results.columns:
-                from westock_helpers import batch_tech_indicators, batch_close_prices
-                codes = l4_results["code"].astype(str).str.zfill(6).unique().tolist()
-                
-                # 技术指标
-                tech = batch_tech_indicators(codes)
-                if tech:
-                    for k in ["signal", "ma", "macd", "rsi"]:
-                        l4_results[f"tech_{k}"] = l4_results["code"].astype(str).str.zfill(6).map(
-                            lambda c, k=k: tech.get(c, {}).get(k, "-"))
-                    logger.info(f"技术面增强: {len(tech)} 只")
-                else:
-                    logger.warning("技术面获取失败，westock technical 不可用")
-                
-                # 当日股价
-                close_map = batch_close_prices(codes)
-                if close_map:
-                    l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
-                    l4_results["close"] = l4_results["code_str"].map(close_map)
-                    l4_results.drop(columns=["code_str"], inplace=True)
-                    logger.info(f"当日股价补齐: {l4_results['close'].notna().sum()}/{len(l4_results)} 只")
-        except Exception as e:
-            logger.warning(f"技术面/股价补齐异常: {e}")
-
-        # 补齐当日股价（westock-data kline — tushare daily_basic 不含 close）
-        try:
-            if len(l4_results) > 0 and "code" in l4_results.columns:
-                from westock_helpers import batch_close_prices
-                codes = l4_results["code"].astype(str).str.zfill(6).unique().tolist()
-                close_map = batch_close_prices(codes)
-                if close_map:
-                    l4_results["code_str"] = l4_results["code"].astype(str).str.zfill(6)
-                    l4_results["close"] = l4_results["code_str"].map(close_map)
-                    l4_results.drop(columns=["code_str"], inplace=True)
-                    filled = l4_results["close"].notna().sum()
-                    logger.info(f"当日股价补齐(westock): {filled}/{len(l4_results)} 只")
-                else:
-                    logger.warning("当日股价补齐失败: westock 返回空，npx可能不在PATH")
-        except Exception as e:
-            logger.warning(f"当日股价补齐异常: {e}")
+        # === 数据补全: name + close + 概念 + 技术面（统一入口，多源回退） ===
+        from data_enricher import enrich_and_report
+        l4_results = enrich_and_report(l4_results)
 
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")
