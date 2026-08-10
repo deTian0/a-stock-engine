@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from multifactor import MultiFactorEngine
 from database import get_db
 from guard import setup_protection, teardown_protection, setup_logging
+from pick_tracker import track_picks
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +294,17 @@ def main():
 
         brief_content = generate_brief(results, config)
         brief_path = save_brief(brief_content, config)
+
+        # 记录命中追踪
+        try:
+            all_picks = pd.concat(
+                [df for df in results["categories"].values() if df is not None and len(df) > 0],
+                ignore_index=True
+            )
+            if len(all_picks) > 0:
+                track_picks(all_picks, session_type=args.session)
+        except Exception as e:
+            logger.warning(f"命中追踪记录失败: {e}")
 
         print(f"\n{'='*60}")
         print(f"盘前选股简报已生成: {brief_path}")

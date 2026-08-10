@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from westock_cli import get_cli
 from database import get_db
 from local_price_loader import LocalPriceLoader
+from pick_tracker import get_tracking_report, track_picks
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,16 @@ def review_sectors(cli, price_loader) -> str:
 
     lines.append(f"\n---\n")
     lines.append(f"*自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
+
+    # ============================================================
+    # 5. 命中追踪
+    # ============================================================
+    try:
+        lines.append("\n")
+        lines.append(get_tracking_report())
+    except Exception as e:
+        logger.warning(f"命中追踪报告失败: {e}")
+
     return "\n".join(lines)
 
 
@@ -266,6 +277,16 @@ def main():
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / "盘后复盘报告.md"
         save_path.write_text(content, encoding="utf-8")
+
+        # 记录盘后命中追踪
+        try:
+            all_stocks = cli.get_stock_list()
+            if len(all_stocks) > 0 and "change_pct" in all_stocks.columns:
+                top_gainers = all_stocks.nlargest(30, "change_pct")
+                if "code" in top_gainers.columns:
+                    track_picks(top_gainers, session_type="post_market")
+        except Exception as e:
+            logger.debug(f"盘后追踪记录跳过: {e}")
 
         logger.info(f"复盘报告已保存: {save_path}")
         print(f"\n复盘报告: {save_path}")
