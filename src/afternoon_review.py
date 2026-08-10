@@ -408,66 +408,76 @@ def main():
 
         content = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
 
-        # T+2 验证: 从2天前选股中找未验证的，用westock kline算收益
+        # T+2 验证: 找到≥2个自然日前选股且未验证的，用kline取T+0/T+2收盘价算收益
         try:
             db = get_db()
-            # 找最近2个交易日前的pick（跳过周末）
-            two_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-            picks = db.conn.execute(
-                "SELECT DISTINCT code, name, DATE(pick_date) as pd FROM stock_picks "
-                "WHERE DATE(pick_date) <= ? ORDER BY pick_date DESC LIMIT 30",
-                (two_days_ago,)
-            ).fetchall()
-            if picks:
-                codes = list(set(r["code"] for r in picks))
-                ws_codes = ",".join(f"sh{c}" if c.startswith(("6","9")) else 
-                                    f"sz{c}" for c in codes)
-                import subprocess
-                r = subprocess.run(
-                    f'npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 4',
-                    capture_output=True, text=True, timeout=60, shell=True
+            today = datetime.now().strftime("%Y-%m-%d")
+            # 找所有≥2天前的选股、且尚未在t2_verifications中
+            rows = db.conn.execute("""
+                SELECT DISTINCT s.code, DATE(s.pick_date) as pd
+                FROM stock_picks s
+                WHERE DATE(s.pick_date) <= DATE('now', '-2 days')
+                AND NOT EXISTS (
+                    SELECT 1 FROM t2_verifications v
+                    WHERE v.code = s.code AND v.pick_date = DATE(s.pick_date)
                 )
-                if r.returncode == 0 and r.stdout:
-                    # 按code收集最近4天收盘价
-                    from collections import defaultdict
-                    closes = defaultdict(list)
+                LIMIT 50
+            """).fetchall()
+
+            if rows:
+                from collections import defaultdict
+                by_pick_date = defaultdict(list)
+                for r in rows:
+                    by_pick_date[r["pd"]].append(r["code"].zfill(6))
+
+                import subprocess
+                for pick_date, codes in by_pick_date.items():
+                    # 计算从pick_date到今天的天数
+                    delta = (datetime.now() - datetime.strptime(pick_date, "%Y-%m-%d")).days + 2
+                    ws_codes = ",".join(f"sh{c}" if c.startswith(("6","9")) else f"sz{c}" for c in codes)
+                    r = subprocess.run(
+                        f"npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit {delta}",
+                        capture_output=True, text=True, timeout=60, shell=True
+                    )
+                    if r.returncode != 0 or not r.stdout:
+                        continue
+
+                    # 解析: kline[0]=最新(today), kline[-1]=最旧(T+0)
+                    by_code = defaultdict(list)
                     for line in r.stdout.strip().split("\n"):
                         if "|" not in line or "symbol" in line or "Batch" in line:
                             continue
                         parts = [p.strip() for p in line.split("|")]
                         if len(parts) < 6:
                             continue
-                        code = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
+                        sym = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
                         try:
-                            close = float(parts[4])
-                            closes[code].append(close)
+                            by_code[sym].append(float(parts[4]))
                         except ValueError:
                             pass
-                    
-                    # 对每只票: T+0=第2个价(昨天), T+2=第0个价(今天)
+
                     verifications = []
-                    for pick in picks:
-                        code = pick["code"].zfill(6)
-                        chain = closes.get(code, [])
-                        if len(chain) >= 3:
-                            t0 = chain[2]  # 2天前 ≈ T+0
-                            t2 = chain[0]  # 今天 ≈ T+2
-                            ret = round((t2 / t0 - 1) * 100, 2) if t0 > 0 else 0
+                    for code in codes:
+                        chain = by_code.get(code, [])
+                        if len(chain) >= 2:
+                            t2_close = chain[0]    # 今天收盘
+                            t0_close = chain[-1]   # 最早(≈pick_date当天收盘)
+                            ret = round((t2_close / t0_close - 1) * 100, 2) if t0_close > 0 else 0
                             status = "positive" if ret > 0 else "negative" if ret < 0 else "flat"
                             verifications.append({
-                                "code": code, "name": pick["name"] or code,
-                                "t0_close": t0, "t2_close": t2,
+                                "code": code, "name": code,
+                                "t0_close": t0_close, "t2_close": t2_close,
                                 "return_pct": ret, "status": status,
                             })
                     if verifications:
-                        db.save_t2_verification(pick_date=two_days_ago, verifications=verifications)
-                        logger.info(f"T+2验证: {len(verifications)} 条已入库")
+                        db.save_t2_verification(pick_date=pick_date, verifications=verifications)
+                        logger.info(f"T+2验证入库: {pick_date} {len(verifications)}条")
         except Exception as e:
             logger.debug(f"T+2验证跳过: {e}")
 
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")
-        save_dir = Path("briefs") / today
+        save_dir = Path("history") / today
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / "盘后复盘报告.md"
         save_path.write_text(content, encoding="utf-8")
