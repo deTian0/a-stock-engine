@@ -334,7 +334,10 @@ class WestockCLI:
         cache_key = f"kline_{code}_{days}_{adjust}"
         cached = self._read_cache(cache_key)
         if cached:
-            return pd.DataFrame(cached)
+            df = pd.DataFrame(cached)
+            if "last" in df.columns and "close" not in df.columns:
+                df = df.rename(columns={"last": "close"})
+            return df
 
         try:
             ws_code = _to_ws_code(code)
@@ -366,7 +369,10 @@ class WestockCLI:
         cache_key = f"index_kline_{code}_{days}"
         cached = self._read_cache(cache_key)
         if cached:
-            return pd.DataFrame(cached)
+            df = pd.DataFrame(cached)
+            if "last" in df.columns and "close" not in df.columns:
+                df = df.rename(columns={"last": "close"})
+            return df
 
         try:
             ws_code = _to_ws_code(code)
