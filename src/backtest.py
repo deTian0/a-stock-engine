@@ -38,10 +38,10 @@ def run_backtest(start_date: str, end_date: str, top_n: int = 10,
 
     # 获取选股记录
     picks = db.conn.execute("""
-        SELECT run_id, DATE(pick_date) as pd, code, name, score
+        SELECT run_id, DATE(date) as pd, code, name, composite_score as score
         FROM stock_picks
-        WHERE DATE(pick_date) BETWEEN ? AND ?
-        ORDER BY pick_date, score DESC
+        WHERE DATE(date) BETWEEN ? AND ?
+        ORDER BY date, composite_score DESC
     """, (start_date, end_date)).fetchall()
 
     if not picks:

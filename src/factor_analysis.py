@@ -57,12 +57,13 @@ def analyze_factors(days: int = 60) -> pd.DataFrame:
     
     # 获取因子得分记录
     rows = db.conn.execute("""
-        SELECT f.run_id, f.code, f.date, f.composite_score,
+        SELECT f.run_id, f.code, s.date, f.composite_score,
                f.pe, f.pb, f.roe, f.momentum_20d, f.momentum_60d,
                f.revenue_growth, f.gross_margin
         FROM factor_scores f
-        WHERE f.date >= DATE('now', ?)
-        ORDER BY f.date DESC
+        JOIN stock_picks s ON f.run_id = s.run_id
+        WHERE s.date >= DATE('now', ?)
+        ORDER BY s.date DESC
     """, (f'-{days} days',)).fetchall()
     
     if not rows:

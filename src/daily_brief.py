@@ -73,6 +73,18 @@ def generate_brief(results: dict, config: dict) -> str:
         else:
             return "短线(1-5日)"
 
+    # 提前初始化所有需要在前置摘要中使用的变量
+    quality = categories.get("②A_质量榜")
+    if quality is not None and len(quality) > 0:
+        long_term = quality[quality.apply(_hold_period, axis=1).str.contains("中长线")].head(8)
+    else:
+        long_term = pd.DataFrame()
+    short_df = categories.get("②B_短线榜")
+    if short_df is None:
+        short_df = pd.DataFrame()
+    etf_picks = results.get("etf_picks", pd.DataFrame())
+    watchlist = categories.get("③C_观察名单")
+
     lines = []
     lines.append(f"# 盘前选股简报 — {today}\n")
     lines.append(f"> 生成时间: {results['timestamp']} | 耗时: {results['elapsed_seconds']}s\n")
@@ -91,22 +103,6 @@ def generate_brief(results: dict, config: dict) -> str:
     for s, cnt in top_sectors.items():
         if cnt >= 3:
             sector_warnings += f"{s}板块集中({cnt}只) "
-
-    verdict = "持仓观望"
-    if "多头" in regime_name:
-        verdict = "可适度加仓"
-    elif "空头" in regime_name:
-        verdict = "减仓防御"
-    else:
-        verdict = "轻仓试探"
-
-    # === 执行摘要（vnpy 风格通知） ===
-    mid = len(long_term)
-    short = len(short_df)
-    etf = len(etf_picks)
-    watch = len(watchlist) if watchlist is not None else 0
-    regime_name = regime.get("regime", "未知") if isinstance(regime, dict) else str(regime)
-    pos_cap_val = regime.get("position_cap", 0.5) if isinstance(regime, dict) else 0.5
 
     verdict = "持仓观望"
     if "多头" in regime_name:
@@ -150,12 +146,6 @@ def generate_brief(results: dict, config: dict) -> str:
     # ============================================================
     # 二、中长线组合（5-20日持仓）
     # ============================================================
-    quality = categories.get("②A_质量榜")
-    if quality is not None and len(quality) > 0:
-        long_term = quality[quality.apply(_hold_period, axis=1).str.contains("中长线")].head(8)
-    else:
-        long_term = pd.DataFrame()
-
     lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
     if len(long_term) > 0:
         lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 基本面 | 评分 |仓位%%| 流动性 | 持有期 | 预期收益 |")
@@ -174,6 +164,34 @@ def generate_brief(results: dict, config: dict) -> str:
             stop = row.get("stop_loss", 0)
             stop_str = f"{stop:.2f}" if stop > 0 else "-"
             liq = row.get("liquidity_tag", "-")
+            # 信号: 基于评分和 RSI 判定
+            rsi6 = row.get("rsi_6")
+            if rsi6 is not None and rsi6 < 35:
+                signal = f"🔥超卖信号(RSI{rsi6:.0f})"
+            elif score >= 80:
+                signal = "🔥质量优选"
+            elif score >= 65:
+                signal = "质量入围"
+            else:
+                signal = "-"
+            # 技术面: MA + MACD
+            ma_status = row.get("ma_status", "")
+            macd_signal = row.get("macd_signal", "")
+            tech_parts = []
+            if ma_status:
+                tech_parts.append(str(ma_status))
+            if macd_signal:
+                tech_parts.append(str(macd_signal))
+            tech = "/".join(tech_parts) if tech_parts else "-"
+            # 基本面: ROE + 营收增速
+            roe_v = row.get("roe")
+            rev_g = row.get("revenue_growth")
+            fund_parts = []
+            if roe_v is not None and pd.notna(roe_v) and roe_v != 0:
+                fund_parts.append(f"ROE{roe_v:.1f}%")
+            if rev_g is not None and pd.notna(rev_g) and rev_g != 0:
+                fund_parts.append(f"营收{rev_g:+.1f}%")
+            fund = "/".join(fund_parts) if fund_parts else "-"
             score = row.get("composite_score", 0)
             # 建议入仓比例 = 仓位上限 × 评分系数
             pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
@@ -217,6 +235,9 @@ def generate_brief(results: dict, config: dict) -> str:
             close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
             lot_price = close * 100 if pd.notna(close) and close > 0 else 0
             lot_str = f"{lot_price:.0f}" if lot_price > 0 else "-"
+            stop = row.get("stop_loss", 0)
+            stop_str = f"{stop:.2f}" if stop > 0 else "-"
+            liq = row.get("liquidity_tag", "-")
             score = row.get("composite_score", 0)
             pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
             pos_ratio = round(pos_cap * 100 * (score / 100), 1) if score > 0 else 0
@@ -225,14 +246,25 @@ def generate_brief(results: dict, config: dict) -> str:
             # 短线需关注反弹信号
             decline = row.get("decline_10d", None)
             vol_ratio = row.get("volume_ratio", None)
-            if decline is not None and vol_ratio is not None:
+            rsi6 = row.get("rsi_6")
+            if rsi6 is not None and rsi6 < 30:
+                signal = f"🔥超跌反弹(RSI{rsi6:.0f})"
+            elif decline is not None and vol_ratio is not None:
                 signal = f"超跌反弹(量比{vol_ratio})"
             else:
                 signal = "-"
+            # 技术面
+            ma_status = row.get("ma_status", "")
+            macd_signal = row.get("macd_signal", "")
+            tech_parts = []
+            if ma_status:
+                tech_parts.append(str(ma_status))
+            if macd_signal:
+                tech_parts.append(str(macd_signal))
+            tech = "/".join(tech_parts) if tech_parts else "-"
             net_ret = _net_return(score)
             lines.append(
-                f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {concept} | {concept_chg} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {mom20} | "
-                f"{signal} | {net_ret:+.1f}% |"
+                f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {concept} | {concept_chg} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {mom20} | {net_ret:+.1f}% |"
             )
     else:
         lines.append("_今日无短线候选_\n")
@@ -240,7 +272,6 @@ def generate_brief(results: dict, config: dict) -> str:
     # ============================================================
     # 四、ETF 组合
     # ============================================================
-    etf_picks = results.get("etf_picks", pd.DataFrame())
     lines.append(f"\n## 四、ETF 组合（{len(etf_picks)} 只，T+0/低磨损 {etf_cost*100:.2f}%）\n")
     if len(etf_picks) > 0:
         lines.append("| 代码 | 名称 | 类型 | 动量20日 | 成交额(亿) | 建议 |")
@@ -279,7 +310,6 @@ def generate_brief(results: dict, config: dict) -> str:
     # ============================================================
     # 六、观察名单
     # ============================================================
-    watchlist = categories.get("③C_观察名单")
     lines.append(f"\n## 六、观察名单（{len(watchlist) if watchlist is not None else 0} 只）\n")
     if watchlist is not None and len(watchlist) > 0:
         lines.append("| 代码 | 名称 | 板块 | 概念 | 评分 | 关注理由 |")
