@@ -135,6 +135,31 @@ def enrich_l4_results(l4_results: pd.DataFrame, dry_run: bool = False) -> pd.Dat
     return df
 
 
+def grade_signal(row) -> str:
+    """
+    Qbot 风格信号强度评级。
+    综合 技术面(偏多/震荡/偏空) + 基本面(ROE) + 评分 → 🔥🔥🔥/🔥🔥/🔥/⚪
+    """
+    score = row.get("composite_score", 50)
+    tech = str(row.get("tech_signal", ""))
+    roe = row.get("roe", 0) if pd.notna(row.get("roe")) else 0
+
+    bullish_bonus = 1 if "偏多" in tech else 0
+    bearish_penalty = 1 if "偏空" in tech else 0
+    roe_bonus = 1 if roe > 10 else (0.5 if roe > 5 else 0)
+
+    effective = score / 100 + bullish_bonus * 0.15 + roe_bonus * 0.1 - bearish_penalty * 0.2
+
+    if effective > 0.85:
+        return "🔥🔥🔥"
+    elif effective > 0.7:
+        return "🔥🔥"
+    elif effective > 0.55:
+        return "🔥"
+    else:
+        return "⚪"
+
+
 def _infer_sector(code: str) -> str:
     """代码前缀推断板块。"""
     code = str(code).zfill(6)
@@ -158,6 +183,8 @@ def enrich_and_report(l4_results: pd.DataFrame) -> pd.DataFrame:
         "tech": (1 if "tech_signal" in l4_results.columns else 0),
     }
     result = enrich_l4_results(l4_results)
+    # 信号强度评级
+    result["signal_grade"] = result.apply(grade_signal, axis=1)
     after = {
         "name": result["name"].notna().sum(),
         "close": result["close"].notna().sum(),

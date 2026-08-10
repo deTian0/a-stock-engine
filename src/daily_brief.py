@@ -449,6 +449,16 @@ def main():
 
         print(f"\n{'='*60}")
         print(f"盘前选股简报已生成: {brief_path}")
+
+        # 生成 HTML 版本
+        try:
+            from html_report import generate_html
+            html_content = generate_html(results, config)
+            html_path = Path(str(brief_path).replace(".md", ".html"))
+            html_path.write_text(html_content, encoding="utf-8")
+            print(f"HTML 简报已生成: {html_path}")
+        except Exception as e:
+            logger.warning(f"HTML 简报生成失败: {e}")
         print(f"市场环境: {results['regime']['regime']} (仓位上限 {results['regime']['position_cap']:.0%})")
         for cat_name, cat_df in results["categories"].items():
             count = len(cat_df) if cat_df is not None else 0
