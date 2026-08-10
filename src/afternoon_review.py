@@ -160,18 +160,22 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
 
         if len(sector_df) > 0 and "change_pct" in sector_df.columns:
             top = sector_df.nlargest(5, "change_pct")
-            lines.append("| 代码 | 名称 | 涨幅 | 量比 | 成交额(亿) | 动因 |")
-            lines.append("|------|------|------|------|-----------|------|")
+            lines.append("| 代码 | 名称 | 当日股价 | 一手价格 | 涨幅 | 量比 | 成交额(亿) | 动因 |")
+            lines.append("|------|------|---------|---------|------|------|-----------|------|")
             for _, row in top.iterrows():
                 code = str(row.get("code", ""))
                 name = str(row.get("name", code))
                 if name.lower() in ("nan", "none", ""):
                     name = code
+                # 当日股价 (从 close 列)
+                close = row.get("close", 0)
+                close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
+                lot_str = f"{close * 100:.0f}" if pd.notna(close) and close > 0 else "-"
                 chg = f"{row.get('change_pct', 0):.1f}%" if pd.notna(row.get("change_pct")) else "-"
                 vol_r = f"{row.get('volume_ratio', 0):.2f}" if pd.notna(row.get("volume_ratio")) else "-"
                 amt = f"{row.get('amount', 0)/1e8:.1f}" if pd.notna(row.get("amount")) else "-"
                 causes = _analyze_cause(row, preloaded_prices, code)
-                lines.append(f"| {code} | {name} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
+                lines.append(f"| {code} | {name} | {close_str} | {lot_str} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
         else:
             lines.append("_个股数据不足_\n")
 
