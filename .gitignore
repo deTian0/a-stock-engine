@@ -16,8 +16,7 @@ data_cache/
 *.json
 !config/config.yaml
 
-# Briefs (daily outputs)
-briefs/
+# Briefs (daily outputs) — tracked, useful for migration
 
 # IDE
 .idea/
