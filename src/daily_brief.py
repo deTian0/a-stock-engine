@@ -241,7 +241,60 @@ def generate_brief(results: dict, config: dict) -> str:
         lines.append("_今日无观察名单_\n")
 
     # ============================================================
-    # 七、统计
+    #  七、持仓追踪与建议
+    # ============================================================
+    lines.append("\n## 七、持仓追踪与建议\n")
+    holdings = config.get("account", {}).get("holdings", {})
+    total_assets = config.get("account", {}).get("total_assets", 0)
+    pos_cap = results["regime"].get("position_cap", 0.5) if isinstance(results["regime"], dict) else 0.5
+    cash = config.get("account", {}).get("available_cash", 0)
+
+    if holdings:
+        all_results = (results.get("l4_results", pd.DataFrame()) if isinstance(results.get("l4_results"), pd.DataFrame) else pd.DataFrame())
+        cur_price_map = {}
+        if len(all_results) > 0 and "code" in all_results.columns:
+            for _, r in all_results.iterrows():
+                if "close" in all_results.columns:
+                    cur_price_map[str(r["code"]).zfill(6)] = r["close"]
+
+        lines.append("| 代码 | 名称 | 当日股价 | 成本 | 盈亏 | 持仓数 | 市值 | 建议 |")
+        lines.append("|------|------|---------|------|------|--------|------|------|")
+        total_mv = 0
+        for code, info in holdings.items():
+            code_str = str(code).zfill(6)
+            shares = info.get("shares", 0)
+            cost = info.get("cost_price", 0)
+            name = info.get("name", code_str)
+            cur_price = cur_price_map.get(code_str, cost)
+            pnl = (cur_price - cost) * shares
+            pnl_pct = ((cur_price / cost) - 1) * 100 if cost > 0 else 0
+            mv = cur_price * shares
+            total_mv += mv
+            if pnl_pct > 5:
+                advice = "✅ 持有"
+            elif pnl_pct > -3:
+                advice = "🟢 持平"
+            else:
+                advice = "⚠️ 关注"
+            lines.append(
+                f"| {code_str} | {name} | {cur_price:.3f} | {cost:.3f} | "
+                f"{pnl:+.1f}({pnl_pct:+.1f}%) | {shares} | {mv:.0f} | {advice} |"
+            )
+
+        position_pct = (total_mv / total_assets * 100) if total_assets > 0 else 0
+        lines.append(f"\n**当前状态**: 总持仓 {total_mv:.0f} 元 | 仓位 {position_pct:.1f}% | 可用资金 {cash:.0f} 元")
+        target_pos = pos_cap * 100
+        if position_pct < target_pos - 5:
+            lines.append(f"**操作建议**: 仓位低于市场允许上限({target_pos:.0f}%)可加仓")
+        elif position_pct > target_pos + 5:
+            lines.append(f"**操作建议**: 仓位高于市场允许上限({target_pos:.0f}%)应减仓")
+        else:
+            lines.append(f"**操作建议**: 仓位匹配市场上限({target_pos:.0f}%)，保持")
+    else:
+        lines.append("_暂无持仓配置_\n")
+
+        # ============================================================
+    # 八、统计
     # ============================================================
     lines.append(f"\n---\n")
     lines.append(f"**统计**: L2过滤后 {results.get('l2_filtered_count', 0)} 只 → "
