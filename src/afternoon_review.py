@@ -31,10 +31,12 @@ from pick_tracker import get_tracking_report, track_picks
 logger = logging.getLogger(__name__)
 
 
-def review_sectors(cli, price_loader) -> str:
+def review_sectors(cli, price_loader, config: dict = None) -> str:
     """
     板块复盘: 获取今日最强板块，分析上涨动因。
     """
+    if config is None:
+        config = {}
     lines = []
     lines.append(f"# 盘后复盘报告 — {datetime.now().strftime('%Y-%m-%d')}\n")
     lines.append(f"> 生成时间: {datetime.now().strftime('%H:%M')}\n")
@@ -109,7 +111,7 @@ def review_sectors(cli, price_loader) -> str:
                 chg = f"{row.get('change_pct', 0):.1f}%" if pd.notna(row.get("change_pct")) else "-"
                 vol_r = f"{row.get('volume_ratio', 0):.2f}" if pd.notna(row.get("volume_ratio")) else "-"
                 amt = f"{row.get('amount', 0)/1e8:.1f}" if pd.notna(row.get("amount")) else "-"
-                causes = _analyze_cause(row, price_loader, code)
+                causes = _analyze_cause(row, preloaded_prices, code)
                 lines.append(f"| {code} | {name} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
         else:
             lines.append("_个股数据不足_\n")
@@ -213,8 +215,90 @@ def review_sectors(cli, price_loader) -> str:
     return "\n".join(lines)
 
 
-def _analyze_cause(row, price_loader, code: str) -> list[str]:
-    """分析个股上涨动因。"""
+def _batch_preload_prices(codes: list[str], config: dict,
+                          price_loader) -> dict[str, list[float]]:
+    """
+    批量预取近20日收盘价。优先 DB，缺失用线程池 API 补全并写回 DB。
+    返回: {code: [close_prices_last_20_days]}
+    """
+    from database import get_market_db
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
+
+    mdb = get_market_db()
+    results = {}
+
+    # Step 1: 批量 SQL 查询
+    batch_size = 500
+    db_hit = 0
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i:i + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        rows = mdb.conn.execute(f"""
+            SELECT code, close FROM daily_price
+            WHERE code IN ({placeholders})
+            ORDER BY code, date DESC
+        """, batch).fetchall()
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for r in rows:
+            code = r["code"].split(".")[0].zfill(6) if "." in r["code"] else r["code"]
+            grouped[code].append(r["close"])
+        for code, closes in grouped.items():
+            if len(closes) >= 20:
+                results[code] = closes[:20]
+                db_hit += 1
+
+    missing = [c for c in codes if c not in results]
+    if not missing:
+        logger.info(f"K线预取: {db_hit}/{len(codes)} DB命中, 无需API补全")
+        return results
+
+    # Step 2: 线程池 API 补全
+    workers = config.get("concurrency", {}).get("review_workers", 8)
+    logger.info(f"K线预取: {db_hit}/{len(codes)} DB命中, {len(missing)} 只API补全 ({workers} workers)")
+
+    def _fetch_one(code):
+        try:
+            df = price_loader.get_price(code, days=20)
+            if len(df) >= 20 and "close" in df.columns:
+                closes = df["close"].tolist()
+                # 写回 DB
+                rows_to_insert = []
+                for j, (_, r) in enumerate(df.iterrows()):
+                    date = str(r.get("date", ""))[:10]
+                    rows_to_insert.append((
+                        f"{code}.SZ", date,
+                        float(r.get("close", 0)),
+                        float(r.get("change_pct", 0)) if pd.notna(r.get("change_pct")) else 0,
+                        float(r.get("volume", 0)) if pd.notna(r.get("volume")) else 0,
+                        float(r.get("amount", 0)) if pd.notna(r.get("amount")) else 0,
+                    ))
+                if rows_to_insert:
+                    try:
+                        mdb.bulk_insert_prices(rows_to_insert)
+                    except Exception:
+                        pass
+                return code, closes
+        except Exception:
+            return code, None
+        return code, None
+
+    api_hit = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_fetch_one, c): c for c in missing}
+        for future in as_completed(futures):
+            code, closes = future.result()
+            if closes:
+                results[code] = closes[:20]
+                api_hit += 1
+
+    logger.info(f"K线预取完成: DB={db_hit} API={api_hit} 总计={len(results)}/{len(codes)}")
+    return results
+
+
+def _analyze_cause(row, prices: dict, code: str) -> list[str]:
+    """分析个股上涨动因（使用预取的价格数据，无网络调用）。"""
     causes = []
     # 量比
     vol_ratio = row.get("volume_ratio")
@@ -224,30 +308,18 @@ def _analyze_cause(row, price_loader, code: str) -> list[str]:
     amp = row.get("amplitude")
     if pd.notna(amp) and amp > 5:
         causes.append(f"高波动(振幅{amp:.1f}%)")
-    # 板块联动(由调用方判断)
-    # 技术形态
-    try:
-        df = price_loader.get_price(code, days=20)
-        if len(df) >= 20:
-            close = df["close"].values
-            ma5 = close[-5:].mean()
-            # 突破5日新高
-            if close[-1] >= close[-20:].max() * 0.98:
-                causes.append("突破近期高点")
-            # 连续阳线
-            if len(close) >= 3 and all(close[-(i+1)] > close[-(i+2)] for i in range(2)):
-                causes.append("连阳走势")
-    except Exception:
-        pass
-
+    # 技术形态（从预取价格计算）
+    close = prices.get(code)
+    if close and len(close) >= 20:
+        # 突破近期高点
+        if close[0] >= max(close[:20]) * 0.98:
+            causes.append("突破近期高点")
+        # 连续阳线（价格从旧到新排列，取最后3根）
+        if len(close) >= 4 and close[0] > close[1] > close[2]:
+            causes.append("连阳走势")
     if not causes:
-        # 检查板块联动
         sector = row.get("sector", "")
-        if sector:
-            causes.append(f"{sector}板块联动")
-        else:
-            causes.append("资金推动")
-
+        causes.append(f"{sector}板块联动" if sector else "资金推动")
     return causes
 
 
@@ -268,8 +340,17 @@ def main():
     cli = get_cli()
     price_loader = LocalPriceLoader()
 
+    # 加载配置
+    import yaml
+    config_path = Path(__file__).parent.parent / "config/config.yaml"
     try:
-        content = review_sectors(cli, price_loader)
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except Exception:
+        config = {}
+
+    try:
+        content = review_sectors(cli, price_loader, config)
 
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")

@@ -115,6 +115,7 @@ rebound_engine:
 # --- 并发控制（防CPU过载）---
 concurrency:
   max_workers: 4                   # L4 线程池最大 worker 数（建议 2-4；CPU 退化设备应更低）
+  review_workers: 8                # 盘后复盘 K 线补全 worker 数（IO密集，可设大些）
   fetch_delay_ms: 50               # 每个 worker 启动间隔（毫秒），避免瞬时 CPU 尖峰
   subprocess_timeout: 30           # 单个 CLI 调用超时（秒）
 
