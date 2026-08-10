@@ -33,52 +33,50 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_change_pct_westock(codes: list[str]) -> dict[str, float]:
-    """用 westock-data batch kline 获取涨跌幅。一次调用查全部+昨天价格，O(1)网络。"""
+    """用 westock-data batch kline 获取涨跌幅。分批调用，每批100只。返回 {code: change_pct%}。"""
     import subprocess
     if not codes:
         return {}
     
-    ws_codes = ",".join(f"sh{c}" if str(c).startswith(("6","9")) else 
-                        f"sz{c}" if str(c).startswith(("0","2","3")) else 
-                        f"bj{c}" for c in codes)
-    
-    try:
-        result = subprocess.run(
-            f'npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 2',
-            capture_output=True, text=True, timeout=30, check=False, shell=True
-        )
-        if result.returncode != 0 or not result.stdout:
-            return {}
+    changes = {}
+    batch_size = 100
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i:i + batch_size]
+        ws_codes = ",".join(f"sh{s}" if s.startswith(("6","9")) else 
+                            f"sz{s}" if s.startswith(("0","2","3")) else 
+                            f"bj{s}" for s in batch)
+        try:
+            result = subprocess.run(
+                f'npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 2',
+                capture_output=True, text=True, timeout=60, check=False, shell=True
+            )
+            if result.returncode != 0 or not result.stdout:
+                continue
+            latest, prev = {}, {}
+            for line in result.stdout.strip().split("\n"):
+                if not line or "|" not in line or "symbol" in line or "Batch" in line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 8:
+                    continue
+                symbol = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
+                try:
+                    close = float(parts[4])
+                except ValueError:
+                    continue
+                if symbol not in latest:
+                    latest[symbol] = close
+                elif symbol not in prev:
+                    prev[symbol] = close
+            for code, today in latest.items():
+                yesterday = prev.get(code, today)
+                if yesterday and yesterday > 0:
+                    changes[code] = round((today / yesterday - 1) * 100, 2)
+        except Exception:
+            continue
 
-        # 解析 batch 输出: symbol | date | open | last | ...
-        lines = result.stdout.strip().split("\n")
-        latest, prev = {}, {}
-        for line in lines:
-            if not line or "|" not in line or "[Batch]" in line or "symbol" in line:
-                continue
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) < 8:
-                continue
-            symbol = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
-            try:
-                close = float(parts[4])  # "last" column = 收盘价
-            except ValueError:
-                continue
-            if symbol not in latest:
-                latest[symbol] = close
-            elif symbol not in prev:
-                prev[symbol] = close
-
-        changes = {}
-        for code, today in latest.items():
-            yesterday = prev.get(code, today)
-            if yesterday and yesterday > 0:
-                changes[code] = round((today / yesterday - 1) * 100, 2)
-        logger.info(f"westock涨跌幅: {len(changes)} 只 (批量kline)")
-        return changes
-    except Exception as e:
-        logger.debug(f"westock涨跌幅获取失败: {e}")
-        return {}
+    logger.info(f"westock涨跌幅: {len(changes)}/{len(codes)} 只 ({len(changes) and 100*len(changes)//len(changes) or 0}%覆盖)")
+    return changes
 
 
 def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
@@ -107,7 +105,8 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
     sector_mapping = {}
     sector_stocks = {}
     try:
-        sector_mapping = cli.get_sector_mapping()
+        codes_for_mapping = stock_list["code"].astype(str).str.zfill(6).unique().tolist() if len(stock_list) > 0 and "code" in stock_list.columns else []
+        sector_mapping = cli.get_sector_mapping(codes_for_mapping[:500] if codes_for_mapping else None)
     except Exception:
         pass
 
@@ -115,7 +114,7 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
     if len(stock_list) > 0 and "code" in stock_list.columns:
         # 注入 westock-data 实时涨跌幅（tushare 不含 change_pct）
         if "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all():
-            sample_codes = stock_list["code"].astype(str).str.zfill(6).head(100).tolist()
+            sample_codes = stock_list["code"].astype(str).str.zfill(6).tolist()
             chg_map = _fetch_change_pct_westock(sample_codes)
             if chg_map:
                 stock_list["change_pct"] = stock_list["code"].astype(str).str.zfill(6).map(chg_map)
@@ -409,9 +408,66 @@ def main():
 
         content = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
 
+        # T+2 验证: 从2天前选股中找未验证的，用westock kline算收益
+        try:
+            db = get_db()
+            # 找最近2个交易日前的pick（跳过周末）
+            two_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+            picks = db.conn.execute(
+                "SELECT DISTINCT code, name, DATE(pick_date) as pd FROM stock_picks "
+                "WHERE DATE(pick_date) <= ? ORDER BY pick_date DESC LIMIT 30",
+                (two_days_ago,)
+            ).fetchall()
+            if picks:
+                codes = list(set(r["code"] for r in picks))
+                ws_codes = ",".join(f"sh{c}" if c.startswith(("6","9")) else 
+                                    f"sz{c}" for c in codes)
+                import subprocess
+                r = subprocess.run(
+                    f'npx -y westock-data-skillhub@1.0.5 kline {ws_codes} --period day --limit 4',
+                    capture_output=True, text=True, timeout=60, shell=True
+                )
+                if r.returncode == 0 and r.stdout:
+                    # 按code收集最近4天收盘价
+                    from collections import defaultdict
+                    closes = defaultdict(list)
+                    for line in r.stdout.strip().split("\n"):
+                        if "|" not in line or "symbol" in line or "Batch" in line:
+                            continue
+                        parts = [p.strip() for p in line.split("|")]
+                        if len(parts) < 6:
+                            continue
+                        code = parts[1].replace("sh","").replace("sz","").replace("bj","").zfill(6)
+                        try:
+                            close = float(parts[4])
+                            closes[code].append(close)
+                        except ValueError:
+                            pass
+                    
+                    # 对每只票: T+0=第2个价(昨天), T+2=第0个价(今天)
+                    verifications = []
+                    for pick in picks:
+                        code = pick["code"].zfill(6)
+                        chain = closes.get(code, [])
+                        if len(chain) >= 3:
+                            t0 = chain[2]  # 2天前 ≈ T+0
+                            t2 = chain[0]  # 今天 ≈ T+2
+                            ret = round((t2 / t0 - 1) * 100, 2) if t0 > 0 else 0
+                            status = "positive" if ret > 0 else "negative" if ret < 0 else "flat"
+                            verifications.append({
+                                "code": code, "name": pick["name"] or code,
+                                "t0_close": t0, "t2_close": t2,
+                                "return_pct": ret, "status": status,
+                            })
+                    if verifications:
+                        db.save_t2_verification(pick_date=two_days_ago, verifications=verifications)
+                        logger.info(f"T+2验证: {len(verifications)} 条已入库")
+        except Exception as e:
+            logger.debug(f"T+2验证跳过: {e}")
+
         # 保存
         today = datetime.now().strftime("%Y-%m-%d")
-        save_dir = Path("history") / today
+        save_dir = Path("briefs") / today
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / "盘后复盘报告.md"
         save_path.write_text(content, encoding="utf-8")
