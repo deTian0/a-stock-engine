@@ -251,6 +251,43 @@ class StockDB:
             updated_at      TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_fund_code ON fundamentals(code);
+
+        -- PIT 财务报表(时点正确): 每只股票每个报告期一行, 含公告日 ann_date
+        -- 回测时只取 ann_date <= 回测日 的最近报告期, 从根上杜绝「用未来财报」的前视
+        CREATE TABLE IF NOT EXISTS fundamentals_pit (
+            code           TEXT    NOT NULL,
+            end_date       TEXT    NOT NULL,   -- 报告期 (YYYYMMDD)
+            ann_date       TEXT,               -- 公告日 (YYYYMMDD), PIT 闸口
+            roe            REAL,
+            roa            REAL,
+            gross_margin   REAL,
+            debt_ratio     REAL,
+            revenue_growth REAL,
+            profit_growth  REAL,
+            eps            REAL,
+            eps_ttm        REAL,
+            bps            REAL,
+            report_type    TEXT,
+            PRIMARY KEY (code, end_date)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_pit_ann ON fundamentals_pit(code, ann_date);
+
+        -- PIT 估值(daily_basic, 时点正确): 每只股票每个交易日一行
+        -- 回测时取 trade_date = 回测日 的 pe/pb/total_mv, 杜绝「用最新估值」的前视
+        CREATE TABLE IF NOT EXISTS daily_basic_pit (
+            code          TEXT    NOT NULL,
+            trade_date    TEXT    NOT NULL,
+            pe            REAL,
+            pe_ttm        REAL,
+            pb            REAL,
+            ps            REAL,
+            ps_ttm        REAL,
+            dv_ratio      REAL,
+            total_mv      REAL,
+            circ_mv       REAL,
+            PRIMARY KEY (code, trade_date)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_dbp_date ON daily_basic_pit(trade_date);
         """)
 
         c.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -896,6 +933,91 @@ class StockDB:
             ).fetchall()
         else:
             rows = c.execute("SELECT * FROM fundamentals").fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+    # ============================================
+    #  PIT 基本面（时点正确，消除前视）
+    # ============================================
+
+    PIT_FIN_COLUMNS = [
+        "code", "end_date", "ann_date", "roe", "roa", "gross_margin",
+        "debt_ratio", "revenue_growth", "profit_growth", "eps", "eps_ttm",
+        "bps", "report_type",
+    ]
+
+    PIT_VAL_COLUMNS = [
+        "code", "trade_date", "pe", "pe_ttm", "pb", "ps", "ps_ttm",
+        "dv_ratio", "total_mv", "circ_mv",
+    ]
+
+    def existing_pit_fin_keys(self) -> set:
+        """返回已入库的 (code, end_date) 集合, 供 DB-first 增量采集。"""
+        rows = self.conn.execute(
+            "SELECT code, end_date FROM fundamentals_pit"
+        ).fetchall()
+        return {(r["code"], r["end_date"]) for r in rows}
+
+    def upsert_fundamentals_pit(self, df: pd.DataFrame) -> int:
+        """批量写入/更新 PIT 财务报表（按 code+end_date 幂等）。"""
+        if df is None or len(df) == 0:
+            return 0
+        cols = self.PIT_FIN_COLUMNS
+        rows = []
+        for _, r in df.iterrows():
+            row = []
+            for c in cols:
+                v = r.get(c)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    row.append(None)
+                else:
+                    row.append(v)
+            rows.append(tuple(row))
+        c = self.conn
+        q = (f"INSERT OR REPLACE INTO fundamentals_pit ({','.join(cols)}) "
+             f"VALUES ({','.join('?' for _ in cols)})")
+        c.executemany(q, rows)
+        c.commit()
+        return len(rows)
+
+    def get_fundamentals_pit_all(self) -> pd.DataFrame:
+        rows = self.conn.execute(
+            "SELECT * FROM fundamentals_pit"
+        ).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+    def existing_pit_val_dates(self) -> set:
+        """返回已采集估值的交易日集合, 供 daily_basic_pit DB-first 增量。"""
+        rows = self.conn.execute(
+            "SELECT DISTINCT trade_date FROM daily_basic_pit"
+        ).fetchall()
+        return {r["trade_date"] for r in rows}
+
+    def upsert_daily_basic_pit(self, df: pd.DataFrame) -> int:
+        """批量写入/更新 PIT 估值（按 code+trade_date 幂等）。"""
+        if df is None or len(df) == 0:
+            return 0
+        cols = self.PIT_VAL_COLUMNS
+        rows = []
+        for _, r in df.iterrows():
+            row = []
+            for c in cols:
+                v = r.get(c)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    row.append(None)
+                else:
+                    row.append(v)
+            rows.append(tuple(row))
+        c = self.conn
+        q = (f"INSERT OR REPLACE INTO daily_basic_pit ({','.join(cols)}) "
+             f"VALUES ({','.join('?' for _ in cols)})")
+        c.executemany(q, rows)
+        c.commit()
+        return len(rows)
+
+    def get_daily_basic_pit_all(self) -> pd.DataFrame:
+        rows = self.conn.execute(
+            "SELECT * FROM daily_basic_pit"
+        ).fetchall()
         return pd.DataFrame([dict(r) for r in rows])
 
     def get_price_batch(self, codes: list[str], date_str: str) -> dict[str, float]:

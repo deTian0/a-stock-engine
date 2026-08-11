@@ -24,6 +24,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from database import get_market_db
 from factor_engine import score_stocks, pick_top_by_sector, filter_candidates
+from pit_fundamentals import PITFundamentals
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,9 @@ class LocalBacktest:
         self._dates_cache: Optional[list[str]] = None
         self._survivors: Optional[set] = None  # 存活股票集合
         self._mom_cache: Optional[dict] = None   # M1a: 预计算动量矩阵 {列名: DataFrame(date×code)}
-        self._fund_cache: Optional[dict] = None  # M1b: 基本面静态截面 {code: {...}}
+        self._pit: Optional[PITFundamentals] = None  # M6: PIT 时点基本面索引
         self._build_momentum_cache()
-        self._build_fund_cache()
+        self._build_pit_index()
 
     def _build_momentum_cache(self):
         """M1a: 一次性从 daily_price 透视 close 矩阵, 预计算各周期动量。
@@ -88,23 +89,20 @@ class LocalBacktest:
         }
         logger.info(f"动量矩阵完成: {close.shape[0]}天×{close.shape[1]}只, 耗时{time.time()-t0:.1f}s")
 
-    def _build_fund_cache(self):
-        """M1b: 加载持久化 fundamentals 表(静态截面)到内存, 供回测合并。
+    def _build_pit_index(self):
+        """M6: 构建 PIT 时点基本面索引, 从根上消除回测前视。
 
-        注意: 这是当前截面(2026-08 估值 + 20260331 财务), 回测历史存在前视偏差,
-        仅用于因子有效性对比; 严格时点匹配见 M6(后续增强)。
+        替代原 _build_fund_cache(静态最新截面): 旧逻辑把 2026-08 估值 + 20260331
+        财务套到所有历史日, 回测 2020 年却用 2026 年 ROE/PE/市值 -> 教科书级前视。
+        现在每个回测日 T 只暴露 ann_date<=T 的最近财报 + T 日估值(见 pit_fundamentals)。
         """
         try:
-            fdf = pd.read_sql(
-                "SELECT code,name,industry,pe,pb,total_mv AS market_cap,roe,gross_margin,"
-                "debt_ratio,revenue_growth,profit_growth FROM fundamentals",
-                self.raw_conn)
-            fdf["code"] = fdf["code"].astype(str).str.zfill(6)
-            self._fund_cache = fdf.set_index("code").to_dict(orient="index")
-            logger.info(f"基本面截面加载: {len(self._fund_cache)} 只")
+            self._pit = PITFundamentals()
+            logger.info(f"PIT 时点基本面索引构建完成"
+                        f"({'有数据' if self._pit._fin_index else '财务为空!'})")
         except Exception as e:
-            logger.warning(f"基本面截面加载失败: {e}")
-            self._fund_cache = {}
+            logger.warning(f"PIT 索引构建失败: {e}")
+            self._pit = None
 
     def _compute_survivors(self, min_days: int = 252) -> set:
         """幸存者偏差校正：排除上市<1年的新股和即将退市的。"""
@@ -173,14 +171,19 @@ class LocalBacktest:
                                   (df["close"] / df["ma60"] - 1) * 100, np.nan)
             df["trend_up"] = (df["ma20"] > df["ma60"])
 
-        # === M1b: 合并基本面(从持久化 fundamentals 静态截面) ===
-        if self._fund_cache:
-            fmap = self._fund_cache
-            df["name"] = df["code"].map(lambda c: fmap.get(c, {}).get("name", c))
-            df["sector"] = df["code"].map(lambda c: fmap.get(c, {}).get("industry", "其他"))
-            for col in ["pe", "pb", "market_cap", "roe", "gross_margin",
-                        "debt_ratio", "revenue_growth", "profit_growth"]:
-                df[col] = df["code"].map(lambda c: fmap.get(c, {}).get(col))
+        # === M6: 合并 PIT 时点基本面(ann_date<=T 的最近财报 + T 日估值) ===
+        if self._pit is not None:
+            codes = df["code"].tolist()
+            fin_map = self._pit.build_fin_map(date_str, codes)
+            # 财务 + 静态 name/industry
+            df["name"] = df["code"].map(lambda c: fin_map.get(str(c).zfill(6), {}).get("name", c))
+            df["sector"] = df["code"].map(
+                lambda c: fin_map.get(str(c).zfill(6), {}).get("industry", "其他"))
+            for col in ["roe", "gross_margin", "debt_ratio",
+                        "revenue_growth", "profit_growth", "eps_ttm", "bps"]:
+                df[col] = df["code"].map(lambda c: fin_map.get(str(c).zfill(6), {}).get(col))
+            # 估值(实际 daily_basic_pit 或 close÷PIT财务 推导) — 真正 PIT
+            self._pit.apply_valuation(df, date_str)
 
         return df
 
