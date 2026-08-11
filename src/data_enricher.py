@@ -65,6 +65,27 @@ def enrich_l4_results(l4_results: pd.DataFrame, dry_run: bool = False) -> pd.Dat
                 logger.warning(f"当日股价补全异常: {e}")
                 report["close"] = f"ERROR:{e}"
 
+        # Plan C: akshare 腾讯实时兜底（westock 失败后，逐只补全仍缺失的 close）
+        still_missing = df["close"].isna() | (df["close"] <= 0)
+        if still_missing.any():
+            try:
+                from westock_cli import get_cli
+                cli = get_cli()
+                filled = 0
+                for c in df.loc[still_missing, "code"].astype(str).str.zfill(6).tolist():
+                    try:
+                        q = cli.get_realtime_quote(c)
+                        if q.get("price"):
+                            df.loc[df["code"].astype(str).str.zfill(6) == c, "close"] = q["price"]
+                            filled += 1
+                    except Exception:
+                        continue
+                if filled:
+                    base = report.get("close", "")
+                    report["close"] = f"{base}+akshare({filled})" if base else f"akshare({filled})"
+            except Exception as e:
+                logger.warning(f"当日股价 akshare 兜底异常: {e}")
+
     # ---- 3. 概念板块 ----
     need_concept = ("concept_name" not in df.columns or 
                     df["concept_name"].isna().all() or 

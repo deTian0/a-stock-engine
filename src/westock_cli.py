@@ -471,6 +471,30 @@ class WestockCLI:
                 return self._ak.get_fundamentals(codes)
             return pd.DataFrame()
 
+    def get_realtime_quote(self, code: str) -> dict:
+        """获取单只实时行情。优先 westock-data，失败回退 akshare(腾讯直连)。
+
+        返回: {name, code, price, prev_close, open}；price 为最新价。
+        """
+        try:
+            from westock_helpers import batch_close_prices
+            cm = batch_close_prices([code])
+            if cm and code in cm and cm[code] and cm[code] > 0:
+                return {"name": "", "code": code, "price": cm[code],
+                        "prev_close": None, "open": None}
+        except Exception as e:
+            logger.debug(f"westock 实时行情失败 {code}: {e}，回退 akshare")
+
+        if self._ak:
+            try:
+                q = self._ak.get_realtime_quote(code)
+                if q and q.get("price") is not None:
+                    return q
+            except Exception as e:
+                logger.debug(f"akshare 实时行情失败 {code}: {e}")
+
+        raise RuntimeError(f"实时行情获取失败: {code}（westock 与 akshare 均不可用）")
+
     def get_sector_mapping(self, codes: list[str] = None) -> dict[str, str]:
         """获取板块映射。优先 tushare，回退 akshare，最终回退 westock-data profile。"""
         if self._ts:
