@@ -39,11 +39,14 @@ RISK_MAX_STOCK_PCT = 5.0
 T_PERIODS = [1, 3, 5]
 MARKET_MA = 60
 INITIAL_CAPITAL = 50000
-MAX_PICKS_PER_DAY = 20
+MAX_PICKS_PER_DAY = 8        # M4: 每日选股数 20→8 (降低分散度/换手)
 TRADE_COST = 0.0013          # 0.13% 交易成本 (股票: 万0.854+印花税)
 ETF_COST = 0.00017           # 0.017% ETF交易成本 (免印花税)
 STOP_LOSS = 5.0              # 止损 (%)
-TARGET_BASE = 3.0            # 基础目标收益 (%)       # 单只股票最大占比 (%)
+TARGET_BASE = 5.0            # 基础目标收益 (%)  M5: 3→5
+TRAIL_STOP_PCT = 6.0         # M2: 移动止损, 自持仓高点回撤比例 (%)
+MAX_POSITIONS = 15           # M4: 最大持仓数 (降低分散度)
+MAX_HOLD_DAYS = 60            # C1: 动态持有安全上限(极长持有才强制了结, 非正常退出)
 
 
 class LocalBacktest:
@@ -54,6 +57,54 @@ class LocalBacktest:
         self.raw_conn = sqlite3.connect(self.db.db_path)
         self._dates_cache: Optional[list[str]] = None
         self._survivors: Optional[set] = None  # 存活股票集合
+        self._mom_cache: Optional[dict] = None   # M1a: 预计算动量矩阵 {列名: DataFrame(date×code)}
+        self._fund_cache: Optional[dict] = None  # M1b: 基本面静态截面 {code: {...}}
+        self._build_momentum_cache()
+        self._build_fund_cache()
+
+    def _build_momentum_cache(self):
+        """M1a: 一次性从 daily_price 透视 close 矩阵, 预计算各周期动量。
+
+        历史回测原依赖 daily_snapshot_<date> 临时缓存(对历史全空), 导致因子失效、
+        退化为纯 pct_chg 排名。这里从日线本身计算, 让动量因子在回测中真正生效。
+        """
+        logger.info("预计算动量矩阵(close 透视)...")
+        t0 = time.time()
+        df = pd.read_sql(
+            "SELECT code, date, close, pct_chg FROM daily_price", self.raw_conn)
+        df["code"] = df["code"].str.replace(r"\.(SZ|SH|BJ)$", "", regex=True)
+        close = df.pivot(index="date", columns="code", values="close").sort_index()
+        chg = df.pivot(index="date", columns="code", values="pct_chg").sort_index()
+        ma20 = close.rolling(20).mean()
+        ma60 = close.rolling(60).mean()
+        self._mom_cache = {
+            "chg_3d": close.pct_change(3),
+            "chg_6d": close.pct_change(6),
+            "chg_10d": close.pct_change(10),
+            "chg_25d": close.pct_change(25),
+            "change_pct": chg,
+            "ma20": ma20,   # B1/C1: 相对强度择时需逐股 MA
+            "ma60": ma60,
+        }
+        logger.info(f"动量矩阵完成: {close.shape[0]}天×{close.shape[1]}只, 耗时{time.time()-t0:.1f}s")
+
+    def _build_fund_cache(self):
+        """M1b: 加载持久化 fundamentals 表(静态截面)到内存, 供回测合并。
+
+        注意: 这是当前截面(2026-08 估值 + 20260331 财务), 回测历史存在前视偏差,
+        仅用于因子有效性对比; 严格时点匹配见 M6(后续增强)。
+        """
+        try:
+            fdf = pd.read_sql(
+                "SELECT code,name,industry,pe,pb,total_mv AS market_cap,roe,gross_margin,"
+                "debt_ratio,revenue_growth,profit_growth FROM fundamentals",
+                self.raw_conn)
+            fdf["code"] = fdf["code"].astype(str).str.zfill(6)
+            self._fund_cache = fdf.set_index("code").to_dict(orient="index")
+            logger.info(f"基本面截面加载: {len(self._fund_cache)} 只")
+        except Exception as e:
+            logger.warning(f"基本面截面加载失败: {e}")
+            self._fund_cache = {}
 
     def _compute_survivors(self, min_days: int = 252) -> set:
         """幸存者偏差校正：排除上市<1年的新股和即将退市的。"""
@@ -101,19 +152,35 @@ class LocalBacktest:
         df["sector"] = "其他"
         df["name"] = df["code"]
 
-        # 合并基本面
-        try:
-            fund_df = self.db.cache_get(f"daily_snapshot_{date_str}")
-            if fund_df is not None and len(fund_df) > 0:
-                fund_df["code"] = fund_df["code"].astype(str).str.zfill(6)
-                for col in ["name", "sector", "pe", "pb", "market_cap",
-                            "turnover", "amplitude",
-                            "chg_3d", "chg_6d", "chg_10d", "chg_25d", "change_pct"]:
-                    if col in fund_df.columns:
-                        fund_map = fund_df.set_index("code")[col].to_dict()
-                        df[col] = df["code"].map(fund_map)
-        except Exception as e:
-            pass
+        # === M1a: 合并动量(从预计算矩阵, 历史回测真正生效) ===
+        if self._mom_cache:
+            for col in ["chg_3d", "chg_6d", "chg_10d", "chg_25d", "change_pct"]:
+                frame = self._mom_cache.get(col)
+                if frame is not None and date_str in frame.index:
+                    df[col] = df["code"].map(frame.loc[date_str])
+
+        # === B1/C1: 合并相对强度(价格/MA-1)与趋势(MA20>MA60) ===
+        # 供 factor_engine 的 f_rs / f_trend 因子消费, 并实现"只买站上均线的强势股"。
+        ma20_f = self._mom_cache.get("ma20")
+        ma60_f = self._mom_cache.get("ma60")
+        if ma20_f is not None and date_str in ma20_f.index:
+            df["ma20"] = df["code"].map(ma20_f.loc[date_str])
+            df["ma60"] = df["code"].map(ma60_f.loc[date_str])
+            # 防御: close>0 且 ma>0 才算, 否则 NaN
+            df["rs20"] = np.where((df["close"] > 0) & (df["ma20"] > 0),
+                                  (df["close"] / df["ma20"] - 1) * 100, np.nan)
+            df["rs60"] = np.where((df["close"] > 0) & (df["ma60"] > 0),
+                                  (df["close"] / df["ma60"] - 1) * 100, np.nan)
+            df["trend_up"] = (df["ma20"] > df["ma60"])
+
+        # === M1b: 合并基本面(从持久化 fundamentals 静态截面) ===
+        if self._fund_cache:
+            fmap = self._fund_cache
+            df["name"] = df["code"].map(lambda c: fmap.get(c, {}).get("name", c))
+            df["sector"] = df["code"].map(lambda c: fmap.get(c, {}).get("industry", "其他"))
+            for col in ["pe", "pb", "market_cap", "roe", "gross_margin",
+                        "debt_ratio", "revenue_growth", "profit_growth"]:
+                df[col] = df["code"].map(lambda c: fmap.get(c, {}).get(col))
 
         return df
 
@@ -134,7 +201,11 @@ class LocalBacktest:
         """评分：有基本面→factor_engine，纯价格→动量因子。"""
         has_fundamentals = "market_cap" in df.columns and df["market_cap"].notna().sum() > 100
         if has_fundamentals:
-            return score_stocks(df)
+            # M3+: 权重可由 config.backtest.factor_weights 覆盖, 便于调参
+            weights = None
+            if getattr(self, "config", None):
+                weights = self.config.get("backtest", {}).get("factor_weights")
+            return score_stocks(df, weights=weights)
         # 纯动量评分
         s = df.copy()
         if "pct_chg" in s.columns:
@@ -190,6 +261,17 @@ class LocalBacktest:
             if row:
                 return row[0]
         return None
+
+    def get_ma_on_date(self, code: str, date_str: str, window: int) -> Optional[float]:
+        """查询个股在指定日期的均线值(从预计算矩阵), 供相对强度择时/动态持有判定。"""
+        frame = self._mom_cache.get(f"ma{window}")
+        if frame is None or date_str not in frame.index:
+            return None
+        try:
+            v = frame.at[date_str, code]
+            return float(v) if pd.notna(v) else None
+        except Exception:
+            return None
 
     def verify_performance(self, picks: list[dict], entry_date: str, periods: list[int] = None) -> list[dict]:
         """T+N 收益验证（直查 SQL，不加载全天数据）。"""
@@ -295,7 +377,7 @@ class LocalBacktest:
             for rec in list(daily_records):  # 遍历副本
                 if date_str >= rec["date"]:  # 还没到未来，跳过
                     idx_then = date_index[rec["date"]]
-                    if idx_now - idx_then >= max_period:
+                    if di - idx_then >= max_period:
                         v = self.verify_performance(rec["picks"], rec["date"])
                         verify_results.extend(v)
                         for item in v:
@@ -410,34 +492,54 @@ class LocalBacktest:
             if (di + 1) % 200 == 0:
                 logger.info(f"  进度: {di+1}/{len(all_dates)} | 持仓{len(positions)} | 现金{cash:,.0f}")
 
-            # === 每日持仓评估 ===
+            # === 每日持仓评估 (C1: 动态持有决策, 取消固定到期) ===
             to_sell = []
             for code, pos in list(positions.items()):
                 cur_price = self.get_price_on_date(code, date_str)
                 if cur_price is None:
                     cur_price = pos["buy_price"]
+                # 更新持仓高点
+                if cur_price > pos.get("peak", pos["buy_price"]):
+                    pos["peak"] = cur_price
                 held_days = di - pos["entry_idx"]
                 ret_pct = (cur_price / pos["buy_price"] - 1) * 100
-                reason = None
+                peak_ret = (pos["peak"] / pos["buy_price"] - 1) * 100
 
-                # 1. 触碰止损
+                # 相对强度择时判定 (B1/C1): 个股均线位置
+                ma20 = self.get_ma_on_date(code, date_str, 20)
+                ma60 = self.get_ma_on_date(code, date_str, 60)
+                trend_up = (ma20 is not None and ma60 is not None and ma20 > ma60)
+                below_ma20 = (ma20 is not None and cur_price < ma20)
+
+                reason = None
+                cr = self._trade_cost(code)
+                # 1. 硬止损
                 if ret_pct <= -STOP_LOSS:
                     reason = f"止损({ret_pct:+.1f}%)"
-                # 2. 达到目标
+                # 2. 达到目标(止盈)
                 elif cur_price >= pos["target"]:
                     reason = f"达到目标({ret_pct:+.1f}%)"
-                # 3. 持仓到期
-                elif held_days >= pos["hold_days"]:
-                    reason = f"持仓到期({held_days}天)"
-                # 4. 动量衰减（跌破买入价且持有>3天）
-                elif held_days > 3 and cur_price < pos["buy_price"]:
-                    reason = f"动量衰减({ret_pct:+.1f}%)"
+                # 3. 动态放弃(C1): 趋势破位(MA20 下穿 MA60) → 不再持有
+                elif ma20 is not None and ma60 is not None and not trend_up:
+                    reason = f"趋势破位({ret_pct:+.1f}%)"
+                # 4. 动态放弃(C1): 跌破 MA20 且已持有≥2天(留1天缓冲防噪音) → 放弃
+                elif below_ma20 and held_days >= 2:
+                    reason = f"跌破MA20({ret_pct:+.1f}%)"
+                # 5. 移动止损(M2): 自高点回撤≥TRAIL_STOP_PCT 且曾盈利≥2% 才卖
+                elif held_days > 3 and peak_ret >= 2.0 and \
+                        (pos["peak"] - cur_price) / pos["peak"] >= TRAIL_STOP_PCT / 100:
+                    reason = f"移动止损({ret_pct:+.1f}%)"
+                # 6. 安全上限(C1): 极长持有(>MAX_HOLD_DAYS)才强制了结, 非正常退出
+                elif held_days >= MAX_HOLD_DAYS:
+                    reason = f"持仓上限({held_days}天)"
 
                 if reason:
-                    cash += pos["shares"] * cur_price * (1 - self._trade_cost(code))  # 卖出
+                    cash += pos["shares"] * cur_price * (1 - cr)  # 卖出
+                    net_ret = (cur_price * (1 - cr)) / (pos["buy_price"] * (1 + cr)) - 1
                     sell_log.append({
                         "code": code, "buy_p": pos["buy_price"], "sell_p": cur_price,
-                        "held": held_days, "ret": round(ret_pct, 2), "reason": reason
+                        "held": held_days, "ret": round(ret_pct, 2),
+                        "net_ret": round(net_ret * 100, 2), "reason": reason
                     })
                     to_sell.append(code)
 
@@ -455,6 +557,8 @@ class LocalBacktest:
             if not regime.get(date_str, True):
                 continue
             if cash < 5000:  # 资金太少不买
+                continue
+            if len(positions) >= MAX_POSITIONS:  # M4: 持仓已满不买
                 continue
 
             df = self.load_day_data(date_str)
@@ -480,6 +584,14 @@ class LocalBacktest:
                 if price <= 0:
                     continue
 
+                # B1: 相对强度择时 — 只买站上 MA20 的强势股; 若 MA60 可得且趋势向下则不买
+                ma20 = self.get_ma_on_date(code, date_str, 20)
+                ma60 = self.get_ma_on_date(code, date_str, 60)
+                if ma20 is not None and price < ma20:
+                    continue  # 跌破 MA20 的弱势股, 不买
+                if ma20 is not None and ma60 is not None and ma20 <= ma60:
+                    continue  # 下降趋势 (MA20 ≤ MA60), 不买
+
                 alloc = cash / max(MAX_PICKS_PER_DAY - buy_count, 1)
                 shares = int(alloc / price / 100) * 100
                 if shares < 100:
@@ -489,13 +601,13 @@ class LocalBacktest:
                 if cost > cash * 0.5:
                     continue
 
-                # 动态持仓天数：分高→多拿，分低→早走
+                # 动态持仓天数 (M5): 5-15天
                 s = float(row["composite_score"])
                 percentile = min(1.0, max(0.1, (s - s_median) / s_range + 0.5))
-                hold_days = max(3, min(10, int(5 + percentile * 5)))  # 3-10天
+                hold_days = max(5, min(15, int(8 + percentile * 7)))  # 5-15天
 
-                # 目标价：分越高目标越高
-                target_pct = TARGET_BASE + percentile * 5  # 3%-8%
+                # 目标价 (M5): 5%-12%
+                target_pct = TARGET_BASE + percentile * 7  # 5%-12%
                 target_price = price * (1 + target_pct / 100)
                 stop_price = price * (1 - STOP_LOSS / 100)
 
@@ -503,17 +615,27 @@ class LocalBacktest:
                 positions[code] = {
                     "code": code, "buy_price": price, "shares": shares,
                     "target": round(target_price, 2), "stop": round(stop_price, 2),
-                    "hold_days": hold_days, "entry_idx": di, "score": round(s, 2)
+                    "hold_days": hold_days, "entry_idx": di, "score": round(s, 2),
+                    "peak": price,
                 }
                 buy_count += 1
                 if buy_count >= MAX_PICKS_PER_DAY:
                     break
 
-        # 清仓
+        # 清仓 (A2: 期末平仓也计入真实买卖胜率)
         last_date = all_dates[-1]
+        last_idx = len(all_dates) - 1
         for code, pos in list(positions.items()):
             sp = self.get_price_on_date(code, last_date) or pos["buy_price"]
-            cash += pos["shares"] * sp * (1 - self._trade_cost(code))  # 清仓
+            cr = self._trade_cost(code)
+            cash += pos["shares"] * sp * (1 - cr)  # 清仓
+            gross = sp / pos["buy_price"] - 1
+            net_ret = (sp * (1 - cr)) / (pos["buy_price"] * (1 + cr)) - 1
+            sell_log.append({
+                "code": code, "buy_p": pos["buy_price"], "sell_p": sp,
+                "held": last_idx - pos["entry_idx"], "ret": round(gross * 100, 2),
+                "net_ret": round(net_ret * 100, 2), "reason": "期末清仓"
+            })
         total = cash
         portfolio.append((last_date, round(total, 2)))
 
@@ -542,6 +664,23 @@ class LocalBacktest:
         avg_held = np.mean([sl["held"] for sl in sell_log]) if sell_log else 0
         avg_ret = np.mean([sl["ret"] for sl in sell_log]) if sell_log else 0
 
+        # A2: 真实买卖胜率 (扣买卖成本后的净收益)
+        net_rets = [sl["net_ret"] for sl in sell_log] if sell_log else []
+        wins = [r for r in net_rets if r > 0]
+        losses = [r for r in net_rets if r <= 0]
+        win_rate = (len(wins) / len(net_rets) * 100) if net_rets else 0.0
+        avg_win = float(np.mean(wins)) if wins else 0.0
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        pl_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else float("inf")
+        # 净收益分布
+        dist = {"<=-5%": 0, "-5%~0%": 0, "0%~5%": 0, "5%~10%": 0, ">=10%": 0}
+        for r in net_rets:
+            if r <= -5: dist["<=-5%"] += 1
+            elif r < 0: dist["-5%~0%"] += 1
+            elif r < 5: dist["0%~5%"] += 1
+            elif r < 10: dist["5%~10%"] += 1
+            else: dist[">=10%"] += 1
+
         # 逐年
         yearly = {}
         for d, v in portfolio:
@@ -555,7 +694,11 @@ class LocalBacktest:
             "sharpe": round(sharpe,2), "years": round(years,1),
             "year_returns": year_returns, "portfolio": portfolio,
             "sell_stats": {"reasons": reasons, "avg_held_days": round(avg_held,1),
-                           "avg_return": round(avg_ret,2), "total_trades": len(sell_log)},
+                           "avg_return": round(avg_ret,2), "total_trades": len(sell_log),
+                           "win_rate": round(win_rate, 1),
+                           "avg_win": round(avg_win, 2), "avg_loss": round(avg_loss, 2),
+                           "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio != float("inf") else None,
+                           "net_return_dist": dist},
         }
 
 
@@ -587,6 +730,13 @@ def generate_html_report(pf: dict, config: dict) -> str:
         f"<tr><td>{k}</td><td>{v}</td><td>{v/sell['total_trades']*100:.0f}%</td></tr>"
         for k, v in sell.get("reasons", {}).items()
     ) if sell else ""
+    dist = sell.get("net_return_dist", {})
+    dist_rows = "".join(
+        f"<tr><td>{k}</td><td>{v}</td><td>{v/sell['total_trades']*100:.0f}%</td></tr>"
+        for k, v in dist.items()
+    ) if dist else ""
+    win_rate = sell.get("win_rate", 0)
+    pl_ratio = sell.get("profit_loss_ratio")
 
     html = f"""<!DOCTYPE html>
 <html lang=\"zh-CN\">
@@ -629,6 +779,7 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
   <div class=\"card\"><div class=\"label\">年化收益</div><div class=\"value {'red' if pf['cagr_pct']>0 else 'green'}\">{pf['cagr_pct']:+.1f}%</div></div>
   <div class=\"card\"><div class=\"label\">最大回撤</div><div class=\"value green\">-{pf['max_drawdown_pct']:.1f}%</div></div>
   <div class=\"card\"><div class=\"label\">夏普比率</div><div class=\"value blue\">{pf['sharpe']}</div></div>
+  <div class=\"card\"><div class=\"label\">买卖胜率(净)</div><div class=\"value {'red' if win_rate<50 else 'green'}\">{win_rate:.1f}%</div></div>
 </div>
 
 <div class=\"chart-container\"><h3>资产曲线</h3><canvas id=\"equityChart\"></canvas></div>
@@ -642,6 +793,20 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
 <tr><th>原因</th><th>笔数</th><th>占比</th></tr>{reason_rows}
 <tr style=\"font-weight:700\"><td>合计</td><td>{sell['total_trades']}</td><td>平均持有{sell.get('avg_held_days',0)}天 / 均益{sell.get('avg_return',0):+.2f}%</td></tr>
 </table></div>
+
+<div class=\"two-col\">
+  <div class=\"chart-container\"><h3>真实买卖胜率 (扣成本)</h3><table>
+  <tr><th>指标</th><th>数值</th></tr>
+  <tr><td>总交易笔数</td><td>{sell['total_trades']}</td></tr>
+  <tr><td>胜率(净收益&gt;0)</td><td style='color:{'red' if win_rate<50 else 'green'};font-weight:700'>{win_rate:.1f}%</td></tr>
+  <tr><td>平均盈利</td><td>{sell.get('avg_win',0):+.2f}%</td></tr>
+  <tr><td>平均亏损</td><td>{sell.get('avg_loss',0):+.2f}%</td></tr>
+  <tr><td>盈亏比</td><td>{pl_ratio if pl_ratio is not None else '—'}</td></tr>
+  </table></div>
+  <div class=\"chart-container\"><h3>净收益分布</h3><table>
+  <tr><th>区间</th><th>笔数</th><th>占比</th></tr>{dist_rows}
+  </table></div>
+</div>
 
 </div>
 <script>
@@ -690,7 +855,7 @@ def main():
         cap = cfg("portfolio", "initial_capital", INITIAL_CAPITAL)
         mpd = cfg("portfolio", "max_picks_per_day", MAX_PICKS_PER_DAY)
         logger.info("\n" + "=" * 60)
-        logger.info(f"资金模拟: 初始 {cap:,} 元, 日选 {mpd} 只, 动态持仓 3-10天")
+        logger.info(f"资金模拟: 初始 {cap:,} 元, 日选 {mpd} 只, 动态持有(相对强度择时)")
         logger.info("=" * 60)
         pf = bt.run_portfolio()
 
@@ -713,6 +878,9 @@ def main():
         sell_stats = pf.get("sell_stats", {})
         if sell_stats:
             print(f"\n卖出统计 ({sell_stats['total_trades']}笔):")
+            print(f"  真实买卖胜率(净): {sell_stats.get('win_rate',0):.1f}% | "
+                  f"盈亏比: {sell_stats.get('profit_loss_ratio')} | "
+                  f"平均盈利 {sell_stats.get('avg_win',0):+.2f}% / 平均亏损 {sell_stats.get('avg_loss',0):+.2f}%")
             print(f"  平均持有: {sell_stats['avg_held_days']}天 | 平均收益: {sell_stats['avg_return']:+.2f}%")
             for reason, cnt in sell_stats.get("reasons", {}).items():
                 print(f"  {reason}: {cnt}笔")
@@ -729,6 +897,25 @@ def main():
         if cfg("output", "save_html", True):
             html_path = generate_html_report(pf, config)
             print(f"可视化: {html_path}")
+
+        # ===== A1: 统一框架 — 同时跑 T+N 验证(run), 消除"胜率"概念混淆 =====
+        # run_portfolio 产出的是「真实资金买卖」胜率(见上 sell_stats.win_rate);
+        # run() 产出的是「选股后持有 T+N 日」的截面胜率, 两套口径不同, 一并呈现。
+        logger.info("\n" + "=" * 60)
+        logger.info("T+N 选股验证框架 (run)")
+        logger.info("=" * 60)
+        res = bt.run(start_date="2020-01-01")
+        print(f"\n{'='*60}")
+        print(f"T+N 选股验证 ({res['total_dates']}交易日, {res['total_picks']}次推荐)")
+        print(f"{'='*60}")
+        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
+            st = res.get("stats", {}).get(period)
+            if st:
+                print(f"  {period}: 胜率 {st['win_rate']:.1f}% | 均值 {st['avg']:+.2f}% | "
+                      f"样本 {st['count']} | 极值 [{st['min']:+.1f}%, {st['max']:+.1f}%]")
+        rs = res.get("stats_risk", {}).get("T+1_ret")
+        if rs:
+            print(f"  风控后 T+1 胜率: {rs['win_rate']:.1f}% | 均值 {rs['avg']:+.2f}%")
 
     except KeyboardInterrupt:
         logger.warning("用户中断")

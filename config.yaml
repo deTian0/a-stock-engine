@@ -50,3 +50,25 @@ brief:
     etf: 0.20            # ETF 定投仓（不计入战术仓位表, 单独 DCA）
   max_single_position: 0.08   # 单只股票占总资金上限 (8%)
   method: score_weighted      # score_weighted | equal
+
+# ============================================================
+# 回测引擎 — 因子权重 (可被覆盖, 便于调参)
+# ------------------------------------------------------------
+# 关键修复: 旧版 key 用 momentum/pe_value (无 f_ 前缀), 但 score_stocks 内
+# weights.get(col) 用 f_momentum/f_pe_value 等 → 永远命中不到 → 全部回退 1/len 均权,
+# 调参彻底失效 (已修正为本文件的 f_ 前缀)。
+# 设计(B1): 相对强度(f_rs 0.18)+趋势(f_trend 0.10) 主导, 估值(pe+pb=0.17)显著下调,
+# 质量降至0.05(规避 static 前视接盘未来大白马)。真正确解见 M6(时点对齐基本面)。
+# ============================================================
+backtest:
+  factor_weights:
+    f_momentum: 0.06
+    f_momentum_25d: 0.05
+    f_momentum_multi: 0.03
+    f_rs: 0.18
+    f_trend: 0.10
+    f_pe_value: 0.10
+    f_pb_value: 0.07
+    f_small_cap: 0.06
+    f_low_vol: 0.10
+    f_quality: 0.05

@@ -17,15 +17,22 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # 默认权重配置（可被 config.yaml 覆盖）
+# 注意: key 必须与下方 f_ 因子列名一致! 旧版 config 用 momentum/pe_value 等无前缀名,
+#       导致 score_stocks 中 weights.get(col) 永远命中不到 → 全部回退 1/len 均权,
+#       调参彻底失效 (已修正 config 同步为 f_ 前缀)。
+# 设计: 相对强度(f_rs 0.18) + 趋势(f_trend 0.10) 主导, 估值(pe+pb 0.17)显著下调,
+#       质量降至0.05(规避 static 前视接盘), 见 B1/M6。
 DEFAULT_WEIGHTS = {
-    "momentum": 0.15,
-    "momentum_25d": 0.10,
-    "momentum_multi": 0.10,
-    "pe_value": 0.15,
-    "pb_value": 0.10,
-    "small_cap": 0.20,
-    "low_vol": 0.10,
-    "quality": 0.10,
+    "f_momentum": 0.06,
+    "f_momentum_25d": 0.05,
+    "f_momentum_multi": 0.03,
+    "f_rs": 0.18,           # 相对强度(价格站上MA20) — 新增, 治 4/6 月反向
+    "f_trend": 0.10,        # 趋势(MA20>MA60) — 新增
+    "f_pe_value": 0.10,     # 估值下调(原0.12)
+    "f_pb_value": 0.07,     # 估值下调(原0.08)
+    "f_small_cap": 0.06,
+    "f_low_vol": 0.10,
+    "f_quality": 0.05,
 }
 
 
@@ -48,8 +55,11 @@ def score_stocks(df: pd.DataFrame, weights: dict = None) -> pd.DataFrame:
     s = df.copy()
     s["sector"] = s["sector"].fillna("其他")
 
-    # === Factor 1: 动量 (当日涨幅) ===
-    s["f_momentum"] = _zscore(s, "change_pct", direction=1, default_col="chg_3d")
+    # === Factor 1: 动量 (10日涨幅, 替代原当日涨幅) ===
+    # 根因: 原用 change_pct(当日涨幅) 方差极大, 其 z-score 淹没有估值/质量因子,
+    # 导致无论怎么调权重选股都退化成"买昨日涨幅王"(典型追涨杀跌, 胜率差)。
+    # 改用 chg_10d(10日) 降低1日噪声主导, 让权重配置真正生效。
+    s["f_momentum"] = _zscore(s, "chg_10d", direction=1, default_col="chg_25d")
 
     # === Factor 2: 中期动量 (25日涨幅) ===
     s["f_momentum_25d"] = _zscore(s, "chg_25d", direction=1, default_col="chg_10d")
@@ -78,6 +88,33 @@ def score_stocks(df: pd.DataFrame, weights: dict = None) -> pd.DataFrame:
     if vol_cols:
         s["_vol_proxy"] = s[vol_cols].mean(axis=1, skipna=True)
         s["f_low_vol"] = _zscore(s, "_vol_proxy", direction=-1)
+
+    # === Factor 8: 质量 (roe/毛利率/负债率/营收增速/净利增速) ===
+    # M3: 让 DEFAULT_WEIGHTS 的 quality(0.22) 真正生效; 列缺失时自动跳过(权重不计入)
+    qual_cols = [c for c in ["roe", "gross_margin", "debt_ratio",
+                             "revenue_growth", "profit_growth"] if c in s.columns]
+    if qual_cols:
+        q_w = {"roe": 0.30, "gross_margin": 0.20, "debt_ratio": 0.20,
+               "revenue_growth": 0.15, "profit_growth": 0.15}
+        q_total = sum(q_w.get(c, 0) for c in qual_cols)
+        q_parts = []
+        for c in qual_cols:
+            # 负债率越低越好(反向); 其余越高越好
+            direction = -1 if c == "debt_ratio" else 1
+            q_parts.append(_zscore(s, c, direction=direction) * q_w[c])
+        s["f_quality"] = sum(q_parts) / q_total
+
+    # === Factor 9: 相对强度 (价格站上 MA20) — B1 新增, 治 4/6 月反向 ===
+    # rs20 = (close/MA20 - 1)*100, 由 load_day_data 注入; 站上均线=强势, 越高越好。
+    # 与纯动量(chg_10d)区别: RS 是"相对自身均线位置", 过滤掉已见顶回落的票,
+    # 实现"只买站上均线的强势股"的择时意图, 而非追当日涨幅王。
+    if "rs20" in s.columns:
+        s["f_rs"] = _zscore(s, "rs20", direction=1, default_col="rs60")
+
+    # === Factor 10: 趋势 (MA20 > MA60) — B1 新增 ===
+    # 多头排列(中短期均线上方)给 +1, 否则 -1。直接映射, 不依赖 z-score 分布。
+    if "trend_up" in s.columns:
+        s["f_trend"] = s["trend_up"].map({True: 1.0, False: -1.0}).fillna(0.0)
 
     # === 综合评分 ===
     factor_cols = [c for c in s.columns if c.startswith("f_")]
