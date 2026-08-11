@@ -16,6 +16,7 @@ local_backtest.py — 基于本地 SQLite 数据的回测引擎 (CPU 安全版)
 import sys, os, time, logging, sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
+import argparse
 from typing import Optional
 
 import pandas as pd
@@ -43,11 +44,13 @@ INITIAL_CAPITAL = 50000
 MAX_PICKS_PER_DAY = 8        # M4: 每日选股数 20→8 (降低分散度/换手)
 TRADE_COST = 0.0013          # 0.13% 交易成本 (股票: 万0.854+印花税)
 ETF_COST = 0.00017           # 0.017% ETF交易成本 (免印花税)
-STOP_LOSS = 5.0              # 止损 (%)
+STOP_LOSS = 8.0              # 止损 (%) — 2026-08-12 固化最优: 硬止损笔数48.7%→33.2%, 总收益-39.65%→-13.66%
 TARGET_BASE = 5.0            # 基础目标收益 (%)  M5: 3→5
 TRAIL_STOP_PCT = 6.0         # M2: 移动止损, 自持仓高点回撤比例 (%)
 MAX_POSITIONS = 15           # M4: 最大持仓数 (降低分散度)
 MAX_HOLD_DAYS = 60            # C1: 动态持有安全上限(极长持有才强制了结, 非正常退出)
+MIN_HOLD = 10                 # 最小持有期(天): 非硬止损卖出需持有>=N天 — 2026-08-12 固化最优(+12%期望值转正)
+PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才买(降换手实验)
 
 
 class LocalBacktest:
@@ -86,6 +89,7 @@ class LocalBacktest:
             "change_pct": chg,
             "ma20": ma20,   # B1/C1: 相对强度择时需逐股 MA
             "ma60": ma60,
+            "min_close_5": close.rolling(5).min(),  # 近5日最低收盘价(回踩不破判定)
         }
         logger.info(f"动量矩阵完成: {close.shape[0]}天×{close.shape[1]}只, 耗时{time.time()-t0:.1f}s")
 
@@ -170,6 +174,15 @@ class LocalBacktest:
             df["rs60"] = np.where((df["close"] > 0) & (df["ma60"] > 0),
                                   (df["close"] / df["ma60"] - 1) * 100, np.nan)
             df["trend_up"] = (df["ma20"] > df["ma60"])
+            # 回踩不破(降换手实验): 近5日最低价>=MA20(留2%容差防噪音), 确认站稳而非刚破即买
+            minc5_f = self._mom_cache.get("min_close_5")
+            if minc5_f is not None and date_str in minc5_f.index:
+                df["min_close_5"] = df["code"].map(minc5_f.loc[date_str])
+                df["pullback_ok"] = np.where(
+                    (df["min_close_5"].notna()) & (df["ma20"] > 0),
+                    df["min_close_5"] >= df["ma20"] * 0.98, True)
+            else:
+                df["pullback_ok"] = True
 
         # === M6: 合并 PIT 时点基本面(ann_date<=T 的最近财报 + T 日估值) ===
         if self._pit is not None:
@@ -516,25 +529,27 @@ class LocalBacktest:
 
                 reason = None
                 cr = self._trade_cost(code)
-                # 1. 硬止损
+                # 1. 硬止损 (始终允许, 保命, 不受最小持有期约束)
                 if ret_pct <= -STOP_LOSS:
                     reason = f"止损({ret_pct:+.1f}%)"
-                # 2. 达到目标(止盈)
-                elif cur_price >= pos["target"]:
-                    reason = f"达到目标({ret_pct:+.1f}%)"
-                # 3. 动态放弃(C1): 趋势破位(MA20 下穿 MA60) → 不再持有
-                elif ma20 is not None and ma60 is not None and not trend_up:
-                    reason = f"趋势破位({ret_pct:+.1f}%)"
-                # 4. 动态放弃(C1): 跌破 MA20 且已持有≥2天(留1天缓冲防噪音) → 放弃
-                elif below_ma20 and held_days >= 2:
-                    reason = f"跌破MA20({ret_pct:+.1f}%)"
-                # 5. 移动止损(M2): 自高点回撤≥TRAIL_STOP_PCT 且曾盈利≥2% 才卖
-                elif held_days > 3 and peak_ret >= 2.0 and \
-                        (pos["peak"] - cur_price) / pos["peak"] >= TRAIL_STOP_PCT / 100:
-                    reason = f"移动止损({ret_pct:+.1f}%)"
-                # 6. 安全上限(C1): 极长持有(>MAX_HOLD_DAYS)才强制了结, 非正常退出
-                elif held_days >= MAX_HOLD_DAYS:
-                    reason = f"持仓上限({held_days}天)"
+                # 其余主动卖出需满足最小持有期(降换手实验: 避免短线频繁进出)
+                elif held_days >= MIN_HOLD:
+                    # 2. 达到目标(止盈)
+                    if cur_price >= pos["target"]:
+                        reason = f"达到目标({ret_pct:+.1f}%)"
+                    # 3. 动态放弃(C1): 趋势破位(MA20 下穿 MA60) → 不再持有
+                    elif ma20 is not None and ma60 is not None and not trend_up:
+                        reason = f"趋势破位({ret_pct:+.1f}%)"
+                    # 4. 动态放弃(C1): 跌破 MA20 且已持有≥2天(留1天缓冲防噪音) → 放弃
+                    elif below_ma20 and held_days >= 2:
+                        reason = f"跌破MA20({ret_pct:+.1f}%)"
+                    # 5. 移动止损(M2): 自高点回撤≥TRAIL_STOP_PCT 且曾盈利≥2% 才卖
+                    elif held_days > 3 and peak_ret >= 2.0 and \
+                            (pos["peak"] - cur_price) / pos["peak"] >= TRAIL_STOP_PCT / 100:
+                        reason = f"移动止损({ret_pct:+.1f}%)"
+                    # 6. 安全上限(C1): 极长持有(>MAX_HOLD_DAYS)才强制了结, 非正常退出
+                    elif held_days >= MAX_HOLD_DAYS:
+                        reason = f"持仓上限({held_days}天)"
 
                 if reason:
                     cash += pos["shares"] * cur_price * (1 - cr)  # 卖出
@@ -594,6 +609,9 @@ class LocalBacktest:
                     continue  # 跌破 MA20 的弱势股, 不买
                 if ma20 is not None and ma60 is not None and ma20 <= ma60:
                     continue  # 下降趋势 (MA20 ≤ MA60), 不买
+                # 回踩不破守卫(降换手实验): 近5日曾破MA20(未站稳)则等确认后再买, 过滤假突破追高
+                if PULLBACK_GUARD and not bool(row.get("pullback_ok", True)):
+                    continue
 
                 alloc = cash / max(MAX_PICKS_PER_DAY - buy_count, 1)
                 shares = int(alloc / price / 100) * 100
@@ -827,7 +845,12 @@ new Chart(document.getElementById('ddChart'),{{
 </script>
 </body></html>"""
 
-    html_path = Path("briefs") / f"回测报告_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
+    tag = f"sl{STOP_LOSS:.0f}"
+    if MIN_HOLD > 0:
+        tag += f"_mh{MIN_HOLD}"
+    if PULLBACK_GUARD:
+        tag += "_pg"
+    html_path = Path("briefs") / f"回测报告_{tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html, encoding="utf-8")
     return str(html_path)
@@ -849,6 +872,28 @@ def main():
     logger.info("=" * 60)
     logger.info("本地数据回测启动")
     logger.info("=" * 60)
+
+    # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N) ----
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
+                    help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
+    ap.add_argument("--min-hold", type=int, default=MIN_HOLD,
+                    help="最小持有期(天): 非硬止损卖出需持有>=N天, 覆盖默认 MIN_HOLD")
+    ap.add_argument("--pullback-guard", action="store_true",
+                    help="入场回踩不破守卫: 近5日最低价>=MA20 才买, 用于降换手对比")
+    ap.add_argument("--skip-tn", action="store_true",
+                    help="跳过 T+N 选股验证(run)，仅跑资金模拟，省时")
+    args = ap.parse_args()
+    STOP_LOSS = args.stop_loss
+    MIN_HOLD = max(0, args.min_hold)
+    PULLBACK_GUARD = args.pullback_guard
+    if abs(STOP_LOSS - 8.0) > 1e-9:
+        logger.info(f"覆盖止损线 STOP_LOSS = {STOP_LOSS}% (默认 8%)")
+    if MIN_HOLD > 0:
+        logger.info(f"启用最小持有期 MIN_HOLD = {MIN_HOLD} 天")
+    if PULLBACK_GUARD:
+        logger.info("启用入场回踩不破守卫 (pullback-guard)")
 
     bt = LocalBacktest()
     bt.config = config  # 注入配置
@@ -891,7 +936,8 @@ def main():
         # 保存资产曲线
         portfolio = pf.get("portfolio", [])
         if portfolio:
-            csv_path = Path("briefs") / f"portfolio_curve_{datetime.now().strftime('%Y%m%d')}.csv"
+            mh_tag = f"_mh{MIN_HOLD}" if MIN_HOLD > 0 else ""
+            csv_path = Path("briefs") / f"portfolio_curve_sl{STOP_LOSS:.0f}{mh_tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             csv_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(portfolio, columns=["date", "value"]).to_csv(csv_path, index=False)
             print(f"\n资产曲线: {csv_path}")
@@ -904,21 +950,22 @@ def main():
         # ===== A1: 统一框架 — 同时跑 T+N 验证(run), 消除"胜率"概念混淆 =====
         # run_portfolio 产出的是「真实资金买卖」胜率(见上 sell_stats.win_rate);
         # run() 产出的是「选股后持有 T+N 日」的截面胜率, 两套口径不同, 一并呈现。
-        logger.info("\n" + "=" * 60)
-        logger.info("T+N 选股验证框架 (run)")
-        logger.info("=" * 60)
-        res = bt.run(start_date="2020-01-01")
-        print(f"\n{'='*60}")
-        print(f"T+N 选股验证 ({res['total_dates']}交易日, {res['total_picks']}次推荐)")
-        print(f"{'='*60}")
-        for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
-            st = res.get("stats", {}).get(period)
-            if st:
-                print(f"  {period}: 胜率 {st['win_rate']:.1f}% | 均值 {st['avg']:+.2f}% | "
-                      f"样本 {st['count']} | 极值 [{st['min']:+.1f}%, {st['max']:+.1f}%]")
-        rs = res.get("stats_risk", {}).get("T+1_ret")
-        if rs:
-            print(f"  风控后 T+1 胜率: {rs['win_rate']:.1f}% | 均值 {rs['avg']:+.2f}%")
+        if not args.skip_tn:
+            logger.info("\n" + "=" * 60)
+            logger.info("T+N 选股验证框架 (run)")
+            logger.info("=" * 60)
+            res = bt.run(start_date="2020-01-01")
+            print(f"\n{'='*60}")
+            print(f"T+N 选股验证 ({res['total_dates']}交易日, {res['total_picks']}次推荐)")
+            print(f"{'='*60}")
+            for period in ["T+1_ret", "T+3_ret", "T+5_ret"]:
+                st = res.get("stats", {}).get(period)
+                if st:
+                    print(f"  {period}: 胜率 {st['win_rate']:.1f}% | 均值 {st['avg']:+.2f}% | "
+                          f"样本 {st['count']} | 极值 [{st['min']:+.1f}%, {st['max']:+.1f}%]")
+            rs = res.get("stats_risk", {}).get("T+1_ret")
+            if rs:
+                print(f"  风控后 T+1 胜率: {rs['win_rate']:.1f}% | 均值 {rs['avg']:+.2f}%")
 
     except KeyboardInterrupt:
         logger.warning("用户中断")
