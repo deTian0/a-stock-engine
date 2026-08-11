@@ -379,10 +379,15 @@ class LocalBacktest:
         return TRADE_COST
 
     def run_portfolio(self) -> dict:
-        """资金模拟：5万起，每只有目标/止损，动态持仓周期。"""
+        """资金模拟：每只有目标/止损，动态持仓周期。初始资金读配置 portfolio.initial_capital。"""
         all_dates = self.get_available_dates()
         all_dates = [d for d in all_dates if d >= "2020-01-01"]  # 只回测 2020+
         c = self.raw_conn
+
+        # 初始资金：优先使用配置 portfolio.initial_capital（与实盘 available_cash 对齐）
+        cap = INITIAL_CAPITAL
+        if getattr(self, "config", None):
+            cap = float(self.config.get("portfolio", {}).get("initial_capital", INITIAL_CAPITAL))
 
         # 市场择时
         market_avg = {}
@@ -393,12 +398,12 @@ class LocalBacktest:
         ma60 = [sum(avg_vals[max(0,i-MARKET_MA+1):i+1])/min(i+1,MARKET_MA) for i in range(len(all_dates))]
         regime = {all_dates[i]: avg_vals[i] > ma60[i] for i in range(len(all_dates))}
 
-        cash = float(INITIAL_CAPITAL)
+        cash = float(cap)
         positions = {}  # {code: {buy_price, shares, target, stop, hold_days, entry_idx, score}}
         portfolio = []
         sell_log = []   # 记录每笔卖出: (code, buy_p, sell_p, held, ret%, reason)
 
-        logger.info(f"资金模拟: 初始{cash:,.0f}元, 日选{MAX_PICKS_PER_DAY}只")
+        logger.info(f"资金模拟: 初始{cap:,.0f}元, 日选{MAX_PICKS_PER_DAY}只")
         logger.info(f"规则: 目标+{TARGET_BASE}~8%, 止损-{STOP_LOSS}%, 成本{TRADE_COST*100:.1f}%")
 
         for di, date_str in enumerate(all_dates):
@@ -516,7 +521,7 @@ class LocalBacktest:
         values = [v for _, v in portfolio]
         returns_daily = [(values[i]/values[i-1]-1) for i in range(1,len(values)) if values[i-1]>0]
         years = len(values) / 252
-        cagr = (values[-1]/INITIAL_CAPITAL)**(1/years)-1 if years>0 else 0
+        cagr = (values[-1]/cap)**(1/years)-1 if years>0 else 0
 
         peak = values[0]; max_dd = 0.0
         for v in values:
@@ -544,8 +549,8 @@ class LocalBacktest:
         year_returns = {y: round((vals[-1]/vals[0]-1)*100,1) for y,vals in yearly.items() if vals[0]>0}
 
         return {
-            "initial": INITIAL_CAPITAL, "final": round(values[-1],2),
-            "return_pct": round((values[-1]/INITIAL_CAPITAL-1)*100,2),
+            "initial": cap, "final": round(values[-1],2),
+            "return_pct": round((values[-1]/cap-1)*100,2),
             "cagr_pct": round(cagr*100,2), "max_drawdown_pct": round(max_dd*100,2),
             "sharpe": round(sharpe,2), "years": round(years,1),
             "year_returns": year_returns, "portfolio": portfolio,

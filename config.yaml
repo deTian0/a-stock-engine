@@ -2,7 +2,7 @@
 # 修改参数后直接运行: python local_backtest.py
 
 portfolio:
-  initial_capital: 50000        # 初始资金（元）
+  initial_capital: 20000        # 初始资金（元）— 与 account.available_cash 对齐
   max_picks_per_day: 20         # 每日最多持仓
   min_cash_to_trade: 5000       # 现金低于此数不买入
 
