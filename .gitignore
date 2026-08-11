@@ -36,3 +36,8 @@ Thumbs.db
 # Secrets
 .env
 *.env.local
+
+# WorkBuddy 内部目录 / 误生成垃圾文件（勿入库）
+.workbuddy/
+git
+python

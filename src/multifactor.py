@@ -882,23 +882,29 @@ class MultiFactorEngine:
         # v5 反弹引擎
         rebound_picks = self.rebound_engine(filtered)
 
-        # 输出分类
+        # === 数据补全 + 风控：必须先于 categorize ===
+        # 修复: 原顺序先 categorize 再 enrich，导致分类表拿到的是未补全的
+        # 原始 L4，报告里 名称/股价/概念/技术面/止损/流动性 全显示为 '-'。
+        # （enrich 成功日志里的 30 只补全根本没进报告使用的 categories）
+        pos_cap = 0.2  # L0空头默认
+        if isinstance(regime_info, dict):
+            pos_cap = regime_info.get("position_cap", 0.2)
+
+        from data_enricher import enrich_and_report
+        from risk_module import enrich_risk_metrics
+        l4_results = enrich_and_report(l4_results)
+        l4_results = enrich_risk_metrics(l4_results, regime_cap=pos_cap)
+        # 反弹候选同样补全（②B 短线榜会并入 rebound_picks，否则这些行仍缺字段）
+        if len(rebound_picks) > 0:
+            rebound_picks = enrich_and_report(rebound_picks)
+            rebound_picks = enrich_risk_metrics(rebound_picks, regime_cap=pos_cap)
+
+        # 输出分类（须在补全/风控之后，分类表才会携带完整字段）
         holdings = self.config.get("account", {}).get("holdings", {})
         categories = self.categorize(l4_results, rebound_picks, holdings)
 
         # ETF 选股
         etf_picks = self.select_etfs()
-
-        # === 数据补全: name + close + 概念 + 技术面（统一入口，多源回退） ===
-        from data_enricher import enrich_and_report
-        l4_results = enrich_and_report(l4_results)
-
-        # === 风控指标: 止损价 + Kelly仓位 + 板块集中度 + 流动性 ===
-        pos_cap = 0.2  # L0空头默认
-        if isinstance(regime_info, dict):
-            pos_cap = regime_info.get("position_cap", 0.2)
-        from risk_module import enrich_risk_metrics
-        l4_results = enrich_risk_metrics(l4_results, regime_cap=pos_cap)
 
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")

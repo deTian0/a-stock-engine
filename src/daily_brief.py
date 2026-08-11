@@ -180,6 +180,7 @@ def generate_brief(results: dict, config: dict) -> str:
             stop = row.get("stop_loss", 0)
             stop_str = f"{stop:.2f}" if stop > 0 else "-"
             liq = row.get("liquidity_tag", "-")
+            score = row.get("composite_score", 0)
             # 信号: 基于评分和 RSI 判定
             rsi6 = row.get("rsi_6")
             if rsi6 is not None and rsi6 < 35:
@@ -208,7 +209,6 @@ def generate_brief(results: dict, config: dict) -> str:
             if rev_g is not None and pd.notna(rev_g) and rev_g != 0:
                 fund_parts.append(f"营收{rev_g:+.1f}%")
             fund = "/".join(fund_parts) if fund_parts else "-"
-            score = row.get("composite_score", 0)
             # 篮子仓位: 该票占「总资金」比例 (来自中长线篮子分配)
             pos_ratio = round(quality_pos_map.get(code, 0) * 100, 2)
             period = _hold_period(row)
