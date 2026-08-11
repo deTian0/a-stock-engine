@@ -34,7 +34,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StockDB:
@@ -219,6 +219,38 @@ class StockDB:
             PRIMARY KEY (code, session_type)
         );
         CREATE INDEX IF NOT EXISTS idx_pfreq_hits ON pick_frequency(total_hits DESC);
+
+        -- 持久化基本面表（v4 新增）：全市场截面基本面快照，code 主键
+        -- 估值来自 daily_basic（total_mv/circ_mv 已转元）；财务来自 fina_indicator（period 过滤）
+        CREATE TABLE IF NOT EXISTS fundamentals (
+            code            TEXT PRIMARY KEY,
+            name            TEXT,
+            industry        TEXT,
+            area            TEXT,
+            list_date       TEXT,
+            market          TEXT,
+            pe              REAL,
+            pe_ttm          REAL,
+            pb              REAL,
+            ps              REAL,
+            ps_ttm          REAL,
+            dv_ratio        REAL,
+            total_mv        REAL,
+            circ_mv         REAL,
+            roe             REAL,
+            roa             REAL,
+            gross_margin    REAL,
+            debt_ratio      REAL,
+            revenue_growth  REAL,
+            profit_growth   REAL,
+            dedt_net_profit REAL,
+            eps             REAL,
+            bps             REAL,
+            report_period   TEXT,
+            valuation_date  TEXT,
+            updated_at      TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fund_code ON fundamentals(code);
         """)
 
         c.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -819,6 +851,52 @@ class StockDB:
         """, rows)
         c.commit()
         return len(rows)
+
+    # ============================================
+    #  持久化基本面表（v4 新增）
+    # ============================================
+
+    FUND_COLUMNS = [
+        "code", "name", "industry", "area", "list_date", "market",
+        "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio",
+        "total_mv", "circ_mv", "roe", "roa", "gross_margin", "debt_ratio",
+        "revenue_growth", "profit_growth", "dedt_net_profit", "eps", "bps",
+        "report_period", "valuation_date",
+    ]
+
+    def upsert_fundamentals(self, df: pd.DataFrame) -> int:
+        """批量写入/更新基本面快照。df 需包含 FUND_COLUMNS 中的列。"""
+        if df is None or len(df) == 0:
+            return 0
+        cols = self.FUND_COLUMNS
+        rows = []
+        for _, r in df.iterrows():
+            row = []
+            for c in cols:
+                v = r.get(c)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    row.append(None)
+                else:
+                    row.append(v)
+            rows.append(tuple(row))
+        c = self.conn
+        q = (f"INSERT OR REPLACE INTO fundamentals ({','.join(cols)}) "
+             f"VALUES ({','.join('?' for _ in cols)})")
+        c.executemany(q, rows)
+        c.commit()
+        return len(rows)
+
+    def get_fundamentals_table(self, codes: list[str] = None) -> pd.DataFrame:
+        """读取基本面表。codes 为空返回全表。"""
+        c = self.conn
+        if codes:
+            placeholders = ",".join("?" for _ in codes)
+            rows = c.execute(
+                f"SELECT * FROM fundamentals WHERE code IN ({placeholders})", codes
+            ).fetchall()
+        else:
+            rows = c.execute("SELECT * FROM fundamentals").fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
 
     def get_price_batch(self, codes: list[str], date_str: str) -> dict[str, float]:
         """批量查询指定日期多只股票的收盘价（用于T+N验证）。"""

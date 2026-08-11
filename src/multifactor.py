@@ -433,20 +433,37 @@ class MultiFactorEngine:
         total = len(codes)
         logger.info(f"L4 评分: 开始处理 {total} 只股票...")
 
-        # === Step 1: 尝试本地快照（基本面 + 多周期动量） ===
+        # === Step 0: 持久化基本面表（优先，最全，避免每日重复拉 Tushare） ===
         fund_lookup = {}
+        try:
+            from fundamental_store import FundamentalStore
+            fstore = FundamentalStore()
+            fdf = fstore.get_by_codes(codes)
+            if len(fdf) > 0:
+                codes_set = set(codes)
+                hit = 0
+                for _, row in fdf.iterrows():
+                    code = str(row.get("code", ""))
+                    if code in codes_set:
+                        fund_lookup[code] = self._extract_fundamentals(row)
+                        hit += 1
+                logger.info(f"  持久化基本面表: {hit}/{total} 只命中")
+        except Exception as e:
+            logger.warning(f"持久化基本面表读取失败: {e}")
+
+        # === Step 1: 本地快照补充缺失（基本面 + 多周期动量） ===
         snapshot_df = self._load_local_snapshot()
         if snapshot_df is not None and len(snapshot_df) > 0:
             codes_set = set(codes)
             hit = 0
             for _, row in snapshot_df.iterrows():
                 code = str(row.get("code", ""))
-                if code in codes_set:
+                if code in codes_set and code not in fund_lookup:
                     fund_lookup[code] = self._extract_fundamentals(row)
                     hit += 1
-            logger.info(f"  本地快照基本面: {hit}/{total} 只命中")
+            logger.info(f"  本地快照基本面(补充): {hit}/{total} 只命中")
         else:
-            logger.info("  本地快照不可用，将使用 CLI 获取基本面")
+            logger.info("  本地快照不可用")
 
         # === Step 2: 批量计算动量（从 daily_price 表） ===
         batch_momentum = self._batch_calc_momentum(codes)

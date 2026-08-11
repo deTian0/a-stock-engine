@@ -352,7 +352,7 @@ class TushareProvider:
                 df = self.pro.fina_indicator(
                     ts_code=ts_code_str,
                     fields="ts_code,roe,roa,grossprofit_margin,debt_to_assets,"
-                           "or_yoy,profit_dedt,total_mv,eps"
+                           "or_yoy,profit_dedt,netprofit_yoy,eps"
                 )
                 if df is not None and len(df) > 0:
                     all_rows.append(df)
@@ -365,13 +365,16 @@ class TushareProvider:
             combined["code"] = combined["ts_code"].apply(_from_ts_code)
 
             # 映射为标准列名
+            # 注意: profit_dedt 是「扣非净利润绝对值(元)」, 不是增速%,
+            #       profit_growth 必须用 netprofit_yoy(净利润同比%);
+            #       market_cap 改从下方 daily_basic.total_mv(万元×1e4) 取, 单位才正确。
             combined = combined.rename(columns={
                 "roe": "roe",
                 "grossprofit_margin": "gross_margin",
                 "debt_to_assets": "debt_ratio",
                 "or_yoy": "revenue_growth",
-                "profit_dedt": "profit_growth",
-                "total_mv": "market_cap",
+                "netprofit_yoy": "profit_growth",
+                "profit_dedt": "dedt_net_profit",
             })
 
             # 补充 name（stock_list → stock_basic兜底 → 代码兜底）
@@ -393,24 +396,28 @@ class TushareProvider:
                 except Exception:
                     combined["name"] = combined["code"]  # 最终兜底用代码
 
-            # 同时补充 PE/PB（从 daily_basic）
+            # 同时补充 PE/PB/market_cap（从 daily_basic）
+            # market_cap 由 total_mv(万元) ×1e4 转元, 单位才正确（不再用 fina_indicator.total_mv）
             try:
                 for offset in range(3):
                     test_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
                     val = self.pro.daily_basic(
                         trade_date=test_date,
-                        fields="ts_code,pe,pb"
+                        fields="ts_code,pe,pb,total_mv"
                     )
                     if val is not None and len(val) > 0:
                         val["code"] = val["ts_code"].apply(_from_ts_code)
                         pe_map = dict(zip(val["code"], val["pe"]))
                         pb_map = dict(zip(val["code"], val["pb"]))
+                        mv_map = dict(zip(val["code"], val["total_mv"] * 1e4))
                         combined["pe"] = combined["code"].map(pe_map)
                         combined["pb"] = combined["code"].map(pb_map)
+                        combined["market_cap"] = combined["code"].map(mv_map)
                         break
             except Exception:
                 combined["pe"] = np.nan
                 combined["pb"] = np.nan
+                combined["market_cap"] = np.nan
 
             logger.info(f"tushare 基本面: {len(combined)} 条 "
                         f"(ROE有效: {combined['roe'].notna().sum()}, "
