@@ -58,6 +58,22 @@ PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才�
 ALPHA_MODE = "lowvol_rev"
 VALUE_FACTOR = False          # lvrev 内核是否接入价值因子(bp/sp): False=默认关(回测 A-B=-10.3pt, 见 STRATEGY §8.6) | True=开(需 --value-factor)
 
+# === 优化扫描杠杆(可配置, 默认 = 已优化基线) ===
+# REVERSAL_WINDOW: 反转入场窗口(天); REVERSAL_Q: 底部分位门槛(越低越严格);
+# BEAR_DD: L0 闸门熊市回撤阈值; EY_WEIGHT: ey(1/pe_ttm)加性价值权重(默认0=关, 不稀释低波/反转)。
+# 2026-08-13 网格扫描(见 STRATEGY §9): 默认基线 = BEAR_DD=0.10 → +30.3%/-10.4%/350笔/夏普0.31;
+#   旧 BEAR_DD=0.12 为 +26.1%(历史实验值, 保留作对照)。
+REVERSAL_WINDOW = int(os.getenv("REVERSAL_WINDOW", "20"))
+REVERSAL_Q = float(os.getenv("REVERSAL_Q", "0.30"))
+BEAR_DD = float(os.getenv("BEAR_DD", "0.10"))  # 方向2: 0.10 已采纳(回撤不变, 收益+4.2pt, 夏普0.31); 旧0.12=+26.1%
+EY_WEIGHT = float(os.getenv("EY_WEIGHT", "0.0"))
+
+# === 用户方向4: 周期性波段验证开关(默认关, 不破护栏) ===
+# TAKE_PROFIT: 机械止盈幅度(%), 0=关(用动态目标5-12%); >0=硬顶"不贪吃"(绕过MIN_HOLD, 涨到即卖)
+# TREND_GATE: 入场需 price>MA200(确保处于上涨周期/ secular uptrend, 不接下行飞刀)
+TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", "0.0"))
+TREND_GATE = bool(int(os.getenv("TREND_GATE", "0")))
+
 
 class LocalBacktest:
     """本地数据回测——SQLite Only。"""
@@ -68,6 +84,7 @@ class LocalBacktest:
         self._dates_cache: Optional[list[str]] = None
         self._survivors: Optional[set] = None  # 存活股票集合
         self._mom_cache: Optional[dict] = None   # M1a: 预计算动量矩阵 {列名: DataFrame(date×code)}
+        self._rev_cache: dict = {}                # 动态反转收益矩阵缓存(按窗口)
         self._pit: Optional[PITFundamentals] = None  # M6: PIT 时点基本面索引
         self._build_momentum_cache()
         self._build_pit_index()
@@ -83,8 +100,9 @@ class LocalBacktest:
         """
         import pickle, os
         cache_file = os.path.join("data_cache", "mom_cache.pkl")
-        sig = self.raw_conn.execute(
+        base_sig = self.raw_conn.execute(
             "SELECT COUNT(*), MAX(date) FROM daily_price").fetchone()
+        sig = (base_sig, "v2_ma200")  # 缓存版本: 新增 ma200(趋势闸门), 旧缓存失效重建
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, "rb") as f:
@@ -108,6 +126,7 @@ class LocalBacktest:
         chg = df.pivot(index="date", columns="code", values="pct_chg").sort_index()
         ma20 = close.rolling(20).mean()
         ma60 = close.rolling(60).mean()
+        ma200 = close.rolling(200).mean()  # 趋势闸门(用户方向4): 上涨周期过滤
         self._mom_cache = {
             "chg_3d": close.pct_change(3),
             "chg_6d": close.pct_change(6),
@@ -117,6 +136,7 @@ class LocalBacktest:
             "change_pct": chg,
             "ma20": ma20,   # B1/C1: 相对强度择时需逐股 MA
             "ma60": ma60,
+            "ma200": ma200,  # 趋势闸门(用户方向4): 仅买站上MA200的上涨周期票
             "min_close_5": close.rolling(5).min(),  # 近5日最低收盘价(回踩不破判定)
             "vol20": chg.rolling(20).std(),  # 20日实现波动率(低波因子, 真 alpha 内核)
         }
@@ -206,7 +226,7 @@ class LocalBacktest:
         #    - 非熊市 且 市场极贵(廉价分位<20%) → 0.6  轻仓
         #    - 其余(正常/便宜)                    → 1.0  满仓
         #    MA200 仅作统计展示, 不单独触发清仓(避免2023震荡段被过度清空)
-        BEAR_DD = 0.12
+        # BEAR_DD 取自模块级全局(可被扫描参数覆盖), 此处不再硬编码
         scale = {}
         for d in level.index:
             dd_v = dd.get(d, np.nan)
@@ -226,6 +246,21 @@ class LocalBacktest:
                     f"耗时{time.time()-t0:.0f}s")
         bear_days = sum(1 for v in scale.values() if v <= 0)
         logger.info(f"L0 闸门完成: {bear_days}/{len(scale)} 天判定熊市(指数<MA200), 耗时{time.time()-t0:.1f}s")
+
+    def _rethreshold_gate(self, bear_dd: float) -> dict:
+        """基于已算好的 (level 自1年高点回撤 dd, 估值廉价分位 cheap) 即时重算 mkt_scale。
+        仅改 BEAR_DD 阈值时无需重读 SQLite/重建指数, 加速闸门扫描。"""
+        if not getattr(self, "_mkt_dd", None):
+            self._build_market_regime()
+        scale = {}
+        for d in self._mkt_dd:
+            dd_v = self._mkt_dd[d]
+            if (not pd.isna(dd_v)) and dd_v <= -bear_dd:
+                scale[d] = 0.0
+            else:
+                cp_v = self._mkt_cheap.get(d, np.nan)
+                scale[d] = 0.6 if (not pd.isna(cp_v)) and cp_v < 0.20 else 1.0
+        return scale
 
     def _compute_survivors(self, min_days: int = 252) -> set:
         """幸存者偏差校正：排除上市<1年的新股和即将退市的。"""
@@ -280,6 +315,15 @@ class LocalBacktest:
                 if frame is not None and date_str in frame.index:
                     df[col] = df["code"].map(frame.loc[date_str])
 
+        # 反转入场窗口自适应: 默认窗口=20 直接用缓存 chg_20d; 否则从 change_pct 矩阵动态算 rev_chg
+        if REVERSAL_WINDOW == 20:
+            if "chg_20d" in df.columns:
+                df["rev_chg"] = df["chg_20d"]
+        else:
+            rev_mat = self._rev_chg_matrix()
+            if rev_mat is not None and date_str in rev_mat.index:
+                df["rev_chg"] = df["code"].map(rev_mat.loc[date_str])
+
         # === B1/C1: 合并相对强度(价格/MA-1)与趋势(MA20>MA60) ===
         # 供 factor_engine 的 f_rs / f_trend 因子消费, 并实现"只买站上均线的强势股"。
         ma20_f = self._mom_cache.get("ma20")
@@ -319,6 +363,21 @@ class LocalBacktest:
 
         return df
 
+    def _rev_chg_matrix(self):
+        """动态反转收益矩阵: 从 change_pct 矩阵算 (1+r).rolling(W).prod()-1, 按窗口缓存。
+        等价 close.pct_change(W), 但无需重缓存即可扫不同反转入场窗口。"""
+        key = f"_rev_chg_{REVERSAL_WINDOW}"
+        if key in self._rev_cache:
+            return self._rev_cache[key]
+        chg = self._mom_cache.get("change_pct") if self._mom_cache else None
+        if chg is None:
+            return None
+        # 注意: 本机 pandas 的 Rolling 对象无 .prod() 方法, 用 .apply(np.prod) 替代
+        # (逐列滚动窗口乘积, 等价于 close.pct_change(W), 但无需重建动量缓存即可扫不同窗口)
+        mat = (1.0 + chg).rolling(REVERSAL_WINDOW).apply(np.prod, raw=True) - 1.0
+        self._rev_cache[key] = mat
+        return mat
+
     def filter_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
         """L2 过滤：有基本面 → factor_engine，纯价格 → 简化过滤。"""
         has_fundamentals = "pe" in df.columns and df["pe"].notna().sum() > 100
@@ -352,80 +411,15 @@ class LocalBacktest:
         return s.sort_values("composite_score", ascending=False)
 
     def _score_lowvol_rev(self, df: pd.DataFrame) -> pd.DataFrame:
-        """真 alpha 内核: 低波动(正) + 反转(近20日超跌) + 价值(便宜) + 质量 + 成长。
+        """真 alpha 内核: 低波动(正) + 反转(近N日超跌) + 价值(便宜) + 质量 + 成长。
 
-        依据 alpha_research.py 诊断(§7.1):
-          - 低波动是唯一稳健正 alpha (IC+0.11, 多空+23%/yr)
-          - 价值(bp/sp)为第二正 alpha: bp IC+0.075 夏普0.60(最强), sp LS20+13.1%
-          - 趋势/动量/RS 为反 alpha (IC 显著负) -> 改用「买近20日超跌」反转
-          - 质量/成长 ≈ 零 alpha, 仅作风险稳定器
-        权重: 低波0.38 / 反转0.27 / 价值0.18 / 质量0.10 / 成长0.07
-        入场口径见 run_portfolio: f_trend(MA20>MA60)硬闸门 + f_rs(相对强度)软闸门(不接飞刀)
-          + 近20日超跌(底部30%分位)核心判据, 而非"买强"。
+        委托单一事实来源 src/lvrev_scorer.score_lvrev —— 回测与盘前实盘(multifactor)
+        共用同一套数学, 保证"研究成果"与"实盘选股"对齐(方向4)。
+        依据 alpha_research.py 诊断(§7.1): 低波动是唯一稳健正 alpha; 趋势/动量/RS 为反 alpha,
+        故改用"买近N日超跌"反转; 质量/成长≈零 alpha, 仅作稳定器。
         """
-        d = df.copy()
-        n = len(d)
-
-        # 1) 低波动: 波动率越低越好 -> (1 - 排名)
-        if "vol20" in d.columns:
-            s_vol = d["vol20"].rank(pct=True, na_option="keep")
-        else:
-            s_vol = pd.Series(0.5, index=d.index)
-        low_vol = (1 - s_vol.fillna(0.5))
-
-        # 2) 反转: 近20日越超跌越买(均值回归) — "近20日超跌"口径; IC 显著负即说明买弱胜买强
-        #    chg_20d 是 alpha_research 中反 alpha 最强的动量窗口(IC20=-0.086), 反向即最强反转信号
-        if "chg_20d" in d.columns:
-            s_rev = (-d["chg_20d"]).rank(pct=True, na_option="keep")
-        elif "chg_10d" in d.columns:
-            s_rev = (-d["chg_10d"]).rank(pct=True, na_option="keep")
-        else:
-            s_rev = pd.Series(0.5, index=d.index)
-        reversal = s_rev.fillna(0.5)
-
-        # 3) 质量: ROE 越高越好, 负债率越低越好
-        s_q = pd.Series(0.5, index=d.index)
-        if "roe" in d.columns:
-            s_q = s_q + d["roe"].clip(-20, 40).fillna(0) / 40.0
-        if "debt_ratio" in d.columns:
-            s_q = s_q - (d["debt_ratio"].clip(0, 100).fillna(50) / 100.0)
-        s_q = s_q.rank(pct=True, na_option="keep").fillna(0.5)
-        quality = s_q
-
-        # 4) 成长: 营收增速越高越好(零 alpha, 稳定器)
-        if "revenue_growth" in d.columns:
-            s_g = d["revenue_growth"].clip(-50, 100).fillna(0).rank(pct=True, na_option="keep")
-        else:
-            s_g = pd.Series(0.5, index=d.index)
-        growth = s_g.fillna(0.5)
-
-        # 5) 价值(便宜): bp=1/pb(book yield) + sp=1/ps_ttm(sales yield), 越便宜越好
-        #    §7.1: bp IC+0.075 夏普0.60(价值因子中最强), sp LS20+13.1%; 二者方向均为正 alpha。
-        #    bp 权重高于 sp(0.6/0.4), 与诊断强度一致。VALUE_FACTOR=False 时退化为仅低波+反转+质量+成长。
-        if "pb" in d.columns and "ps_ttm" in d.columns:
-            bp_clean = d["pb"].where(d["pb"] > 0)
-            sp_clean = d["ps_ttm"].where(d["ps_ttm"] > 0)
-            bp_inv = 1.0 / bp_clean
-            sp_inv = 1.0 / sp_clean
-            s_val_bp = bp_inv.rank(pct=True, na_option="keep").fillna(0.5)
-            s_val_sp = sp_inv.rank(pct=True, na_option="keep").fillna(0.5)
-            value = (0.6 * s_val_bp + 0.4 * s_val_sp).fillna(0.5)
-        else:
-            value = pd.Series(0.5, index=d.index)
-
-        if VALUE_FACTOR:
-            # 新默认: 低波0.38/反转0.27/价值0.18/质量0.10/成长0.07
-            w = dict(vol=0.38, rev=0.27, value=0.18, q=0.10, g=0.07)
-        else:
-            # 价值因子关闭时, 将其权重按原比例回补到低波/反转, 还原 lvrev 原始权重
-            # (vol0.45/rev0.35/质量0.12/成长0.08), 使 A/B 干净隔离"价值因子"本身增量,
-            # 而非"权重再分配"效应(否则 OFF 组低波/反转被稀释, 与历史 +26.1% 基线不可比)。
-            w = dict(vol=0.45, rev=0.35, value=0.0, q=0.12, g=0.08)
-        d["composite_score"] = (
-            w["vol"] * low_vol + w["rev"] * reversal +
-            w["value"] * value + w["q"] * quality + w["g"] * growth
-        )
-        return d.sort_values("composite_score", ascending=False)
+        from lvrev_scorer import score_lvrev
+        return score_lvrev(df, value_factor=VALUE_FACTOR, ey_weight=EY_WEIGHT)
 
     def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
         """按板块分组选 Top N（委托 factor_engine）。"""
@@ -694,8 +688,11 @@ class LocalBacktest:
         regime = {all_dates[i]: avg_vals[i] > ma60[i] for i in range(len(all_dates))}
 
         # L0 市场闸门(宽基MA200 + 估值分位) — 压系统性回撤(§8.4)
+        # 指数/回撤/估值只算一次, 不同 BEAR_DD 阈值即时重算(加速闸门扫描)
         if MARKET_GATE:
-            self._build_market_regime()
+            if not getattr(self, "_mkt_dd", None):
+                self._build_market_regime()
+            self._mkt_scale = self._rethreshold_gate(BEAR_DD)
             mkt_scale = self._mkt_scale
         else:
             mkt_scale = {d: 1.0 for d in all_dates}  # --no-market-gate: 满仓对照
@@ -743,6 +740,9 @@ class LocalBacktest:
                 # 1. 硬止损 (始终允许, 保命, 不受最小持有期约束)
                 elif ret_pct <= -STOP_LOSS:
                     reason = f"止损({ret_pct:+.1f}%)"
+                # 1.5 机械止盈(用户方向4, 绕过MIN_HOLD): 涨到幅度即卖, 不贪吃
+                elif TAKE_PROFIT > 0 and ret_pct >= TAKE_PROFIT:
+                    reason = f"机械止盈({ret_pct:+.1f}%)"
                 # 其余主动卖出需满足最小持有期(降换手实验: 避免短线频繁进出)
                 elif held_days >= MIN_HOLD:
                     # 2. 达到目标(止盈)
@@ -809,9 +809,9 @@ class LocalBacktest:
             vol_med = (float(df["vol20"].median())
                        if "vol20" in df.columns and df["vol20"].notna().any()
                        else float("inf"))
-            # 近20日超跌门槛: 全市场 chg_20d 底部30%分位(自适应: 牛/熊市均判为超跌)
-            chg20_q30 = (float(df["chg_20d"].quantile(0.30))
-                         if "chg_20d" in df.columns and df["chg_20d"].notna().any()
+            # 近N日超跌门槛: 全市场 rev_chg 底部 REVERSAL_Q 分位(自适应: 牛/熊市均判为超跌)
+            chg20_q30 = (float(df["rev_chg"].quantile(REVERSAL_Q))
+                         if "rev_chg" in df.columns and df["rev_chg"].notna().any()
                          else -0.05)
 
             buy_count = 0
@@ -836,8 +836,8 @@ class LocalBacktest:
                     # --- f_rs 降为软闸门(不接远离MA20的飞刀, 而非"必须站上均线买强") ---
                     if ma20 is not None and price < ma20 * 0.93:
                         continue  # 已远低于MA20(自由落体), 不接飞刀
-                    # --- 近20日超跌(反转核心判据): 仅买底部30%分位的超跌票 ---
-                    chg20 = row.get("chg_20d")
+                    # --- 近N日超跌(反转核心判据): 仅买底部 REVERSAL_Q 分位的超跌票 ---
+                    chg20 = row.get("rev_chg")
                     if chg20 is not None and not pd.isna(chg20) and chg20 > chg20_q30:
                         continue  # 近20日未达超跌(>底部30%分位) → 非反转候选
                     # --- 自由落体兜底(MA60 长线支撑) ---
@@ -847,6 +847,11 @@ class LocalBacktest:
                     vol = row.get("vol20")
                     if vol is not None and not pd.isna(vol) and vol > vol_med:
                         continue  # 高波动票, 仅买低波动
+                    # --- 趋势闸门(用户方向4): 仅买站上MA200的上涨周期票, 不接下行飞刀 ---
+                    if TREND_GATE:
+                        ma200 = self.get_ma_on_date(code, date_str, 200)
+                        if ma200 is not None and price < ma200:
+                            continue
                 else:
                     if ma20 is not None and price < ma20:
                         continue  # 跌破 MA20 的弱势股, 不买
@@ -870,8 +875,11 @@ class LocalBacktest:
                 percentile = min(1.0, max(0.1, (s - s_median) / s_range + 0.5))
                 hold_days = max(5, min(15, int(8 + percentile * 7)))  # 5-15天
 
-                # 目标价 (M5): 5%-12%
-                target_pct = TARGET_BASE + percentile * 7  # 5%-12%
+                # 目标价 (M5): 5%-12%; 若启用机械止盈则覆盖为固定硬顶("不贪吃")
+                if TAKE_PROFIT > 0:
+                    target_pct = TAKE_PROFIT
+                else:
+                    target_pct = TARGET_BASE + percentile * 7  # 5%-12%
                 target_price = price * (1 + target_pct / 100)
                 stop_price = price * (1 - STOP_LOSS / 100)
 

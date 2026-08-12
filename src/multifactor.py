@@ -74,6 +74,21 @@ class MultiFactorEngine:
         )
         self._sector_mapping: Optional[dict] = None
 
+        # === 方向4: lvrev 真 alpha 内核对齐开关(与 local_backtest 回测同一套数学) ===
+        # 默认开启: ②A 质量榜评分改用 src/lvrev_scorer.score_lvrev
+        # (低波+近20日超跌反转+质量+成长), 并附加入场风控闸门标记(entry_ok)。
+        # 关闭(use_lvrev_kernel: false) 回退到上方旧动量/价值加权内核(已被证伪的反 alpha, 仅对照)。
+        fl4 = self.config.get("factor_l4", {})
+        self.use_lvrev_kernel = bool(fl4.get("use_lvrev_kernel", True))
+        lv = fl4.get("lvrev", {})
+        self.lvrev_value_factor = bool(lv.get("value_factor", False))
+        self.lvrev_ey_weight = float(lv.get("ey_weight", 0.0))
+        self.lvrev_reversal_q = float(lv.get("reversal_q", 0.30))
+        self.lvrev_apply_gate = bool(lv.get("apply_entry_gate", False))
+        logger.info(f"L4 内核: use_lvrev_kernel={self.use_lvrev_kernel} "
+                    f"(value_factor={self.lvrev_value_factor}, ey={self.lvrev_ey_weight}, "
+                    f"q={self.lvrev_reversal_q}, apply_gate={self.lvrev_apply_gate})")
+
     def _load_config(self, path: str) -> dict:
         path = Path(path)
         if not path.is_absolute():
@@ -311,58 +326,80 @@ class MultiFactorEngine:
 
     def _batch_calc_momentum(self, codes: list[str]) -> dict[str, dict]:
         """
-        从 market.db 的 daily_price 表批量计算 20日/60日动量。
+        从 market.db 的 daily_price 表批量计算 20日/60日动量 + lvrev 内核所需特征。
         daily_price 中 code 格式为 "000001.SZ"，自动去后缀匹配。
+
+        返回 dict 每只包含:
+          - momentum_20d / momentum_60d : 旧 ②B 短线榜 / ETF 仍用(买强对照)
+          - rev_chg  : 近20日超跌 = momentum_20d(反转核心口径, 与回测 chg_20d 等价)
+          - vol20    : 20日实现波动率(低波因子, 真 alpha 内核)
+          - ma20/ma60: 均线(入场风控闸门: 长趋势向上 + 不接飞刀 + 长线支撑)
+        一次读取 daily_price 同时算出全部特征, 避免重复 IO。
         """
         if not codes:
             return {}
         try:
             mdb = get_market_db()
             from collections import defaultdict
-            prices = defaultdict(list)
+            series_by_code: dict[str, list] = defaultdict(list)  # code -> [(date, close)]
             batch_size = 500
 
             for i in range(0, len(codes), batch_size):
                 batch = codes[i:i + batch_size]
                 # 同时匹配纯数字和带后缀的格式
-                batch_plain = [c for c in batch]
-                batch_with_sz = [f"{c}.SZ" for c in batch]
-                batch_with_sh = [f"{c}.SH" for c in batch]
-                all_patterns = batch_plain + batch_with_sz + batch_with_sh
-                placeholders = ",".join("?" for _ in all_patterns)
+                patterns = []
+                for c in batch:
+                    patterns.extend([c, f"{c}.SZ", f"{c}.SH"])
+                placeholders = ",".join("?" for _ in patterns)
                 rows = mdb.conn.execute(f"""
                     SELECT code, date, close FROM daily_price
                     WHERE code IN ({placeholders})
-                    ORDER BY code, date DESC
-                """, all_patterns).fetchall()
+                    ORDER BY code, date ASC
+                """, patterns).fetchall()
                 for r in rows:
                     # 去掉交易所后缀统一匹配
                     code_clean = r["code"].split(".")[0].zfill(6)
-                    prices[code_clean].append(r["close"])
+                    series_by_code[code_clean].append((r["date"], r["close"]))
 
-            if not prices:
+            if not series_by_code:
                 logger.info("daily_price 表无数据，无法批量计算动量")
                 return {}
 
             results = {}
             hit_count = 0
             for code in codes:
-                closes = prices.get(code, [])
-                if len(closes) >= 61:
+                points = series_by_code.get(code, [])
+                n = len(points)
+                if n >= 21:
+                    s = pd.Series(
+                        [p[1] for p in points],
+                        index=[p[0] for p in points],
+                        dtype=float,
+                    )
+                    rets = s.pct_change()
+                    m20 = s.iloc[-1] / s.iloc[-21] - 1 if n >= 21 else 0.0
+                    m60 = s.iloc[-1] / s.iloc[-61] - 1 if n >= 61 else 0.0
+                    rev = float(s.pct_change(20).iloc[-1]) if n > 20 else 0.0
+                    vol = (float(rets.rolling(20).std().iloc[-1])
+                           if rets.dropna().shape[0] >= 20 else float("nan"))
+                    ma20 = float(s.rolling(20).mean().iloc[-1]) if n >= 20 else float("nan")
+                    ma60 = float(s.rolling(60).mean().iloc[-1]) if n >= 60 else float("nan")
                     results[code] = {
-                        "momentum_20d": round((closes[0] / closes[20] - 1) * 100, 2),
-                        "momentum_60d": round((closes[0] / closes[60] - 1) * 100, 2),
-                    }
-                    hit_count += 1
-                elif len(closes) >= 21:
-                    results[code] = {
-                        "momentum_20d": round((closes[0] / closes[20] - 1) * 100, 2),
-                        "momentum_60d": 0.0,
+                        "momentum_20d": round(m20 * 100, 2),
+                        "momentum_60d": round(m60 * 100, 2),
+                        "rev_chg": round(rev * 100, 2),   # 近20日超跌(反转核心)
+                        "vol20": vol,                     # 20日实现波动率(低波)
+                        "ma20": ma20,
+                        "ma60": ma60,
                     }
                     hit_count += 1
                 else:
-                    results[code] = {"momentum_20d": 0.0, "momentum_60d": 0.0}
-            logger.info(f"批量动量计算: {hit_count}/{len(codes)} 只有效 (daily_price 命中)")
+                    results[code] = {
+                        "momentum_20d": 0.0, "momentum_60d": 0.0,
+                        "rev_chg": 0.0, "vol20": float("nan"),
+                        "ma20": float("nan"), "ma60": float("nan"),
+                    }
+            logger.info(f"批量动量/低波/均线计算: {hit_count}/{len(codes)} 只有效 (daily_price 命中)")
             return results
         except Exception as e:
             logger.warning(f"批量动量计算失败: {e}")
@@ -558,14 +595,70 @@ class MultiFactorEngine:
                 executor.shutdown(wait=False)
 
         # === Step 6: 计算综合评分 ===
-        scores_df = pd.DataFrame(factor_list)
-        scores_df = self._calc_composite_score(scores_df, factors_cfg)
-
-        # 按评分降序排列，取前N
-        scores_df = scores_df.sort_values("composite_score", ascending=False).head(top_n)
+        if self.use_lvrev_kernel:
+            # 方向4: 与 local_backtest 回测同一套数学(单一事实来源 src/lvrev_scorer)
+            scores_df = self._score_l4_lvrev(codes, factor_list, candidates)
+        else:
+            scores_df = pd.DataFrame(factor_list)
+            scores_df = self._calc_composite_score(scores_df, factors_cfg)
+            # 按评分降序排列，取前N
+            scores_df = scores_df.sort_values("composite_score", ascending=False).head(top_n)
 
         logger.info(f"L4 评分完成: {len(scores_df)} 只入选 (top {top_n})")
         return scores_df.reset_index(drop=True)
+
+    def _score_l4_lvrev(self, codes: list[str], factor_list: list[dict],
+                        candidates: pd.DataFrame) -> pd.DataFrame:
+        """方向4核心: ②A 质量榜改用 lvrev 真 alpha 内核(与回测同一套数学)。
+
+        调用 src/lvrev_scorer 的 score_lvrev(低波+近20日超跌反转+质量+成长)
+        完成截面评分, 并调用 apply_entry_gates 计算入场风控闸门标记 entry_ok
+        (MA20>MA60 硬闸门 + 不接飞刀 + 底部超跌 + 长线支撑 + 低波门槛)。
+        entry_ok 仅作标记(默认不硬过滤), 保证 ②A 质量榜始终有候选;
+        真正"何时建仓"由 entry_ok 决定(镜像回测入场逻辑), 由 apply_entry_gate 配置硬过滤。
+        """
+        from lvrev_scorer import score_lvrev, apply_entry_gates
+
+        df = pd.DataFrame(factor_list)
+        if len(df) == 0:
+            return df
+
+        # rev_chg 兜底(若批量特征缺失): 用 momentum_20d 等价替代
+        if "rev_chg" not in df.columns and "momentum_20d" in df.columns:
+            df["rev_chg"] = df["momentum_20d"]
+
+        # 注入 close(入场闸门需要价格 vs MA 判定); candidates 可能带收盘价
+        if "close" not in df.columns and candidates is not None and "close" in candidates.columns:
+            try:
+                close_map = {
+                    str(c).zfill(6): v
+                    for c, v in zip(candidates["code"], candidates["close"])
+                }
+                df["close"] = df["code"].astype(str).str.zfill(6).map(close_map)
+            except Exception:
+                pass
+
+        # 单一事实来源内核评分(默认关价值、ey=0 → 与回测 +26.1% 基线一致)
+        scored = score_lvrev(
+            df,
+            value_factor=self.lvrev_value_factor,
+            ey_weight=self.lvrev_ey_weight,
+        )
+
+        # 入场风控闸门标记(始终计算, 供简报展示"是否到买点")
+        keep = apply_entry_gates(scored, reversal_q=self.lvrev_reversal_q)
+        scored["entry_ok"] = keep.reindex(scored.index).fillna(False).values
+
+        # 默认不硬过滤(保证 ②A 有候选); 显式开启则只保留 entry_ok 的
+        if self.lvrev_apply_gate:
+            scored = scored[scored["entry_ok"]]
+
+        scored = scored.sort_values("composite_score", ascending=False).head(
+            self.config.get("factor_l4", {}).get("top_n", 30)
+        )
+        logger.info(f"  lvrev 内核评分: {len(scored)} 只, "
+                    f"其中 entry_ok={int(scored['entry_ok'].sum()) if len(scored) else 0} 只")
+        return scored
 
     def _calc_composite_score(self, df: pd.DataFrame, factors_cfg: list) -> pd.DataFrame:
         """计算加权综合评分。自动跳过缺失列并报告可用性。"""

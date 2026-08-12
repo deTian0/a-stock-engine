@@ -93,6 +93,18 @@ factor_l4:
       direction: "ascending"      # 小市值溢价（越低市值加权越高）
   top_n: 30                       # L4最终选出前N只
 
+  # ===== 方向4: lvrev 真 alpha 内核对齐(与 local_backtest 回测同一套数学) =====
+  # 默认开启: ②A 质量榜评分改用 src/lvrev_scorer.score_lvrev
+  #   = 低波(0.45) + 近20日超跌反转(0.35) + 质量(0.12) + 成长(0.08)
+  #   并附加入场风控闸门标记 entry_ok(MA20>MA60 硬闸门 + 不接飞刀 + 底部超跌 + 长线支撑 + 低波门槛)。
+  # 关闭(use_lvrev_kernel: false) 回退到上方旧动量/价值加权内核(已被证伪的反 alpha, 仅对照)。
+  use_lvrev_kernel: true
+  lvrev:
+    value_factor: false   # 价值因子(bp/sp): 默认关(回测净拖累-10.3pt); 与回测基线一致
+    ey_weight: 0.0        # ey(1/pe_ttm)加性价值权重: 默认0=关(不稀释低波/反转)
+    reversal_q: 0.30      # 底部分位门槛(越低越严格); 与回测 REVERSAL_Q 默认一致
+    apply_entry_gate: false  # 默认仅标记 entry_ok(保证②A有候选); true=硬过滤只留到买点
+
 # --- 输出配置 ---
 output:
   brief_dir: "history"             # 简报输出目录 (git 追踪, 数据不丢失)
