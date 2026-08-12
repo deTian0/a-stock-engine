@@ -51,6 +51,7 @@ MAX_POSITIONS = 15           # M4: 最大持仓数 (降低分散度)
 MAX_HOLD_DAYS = 60            # C1: 动态持有安全上限(极长持有才强制了结, 非正常退出)
 MIN_HOLD = 30                 # 最小持有期(天): 非硬止损卖出需持有>=N天 — v4.8 扫描5/10/15/20/25/30, mh30最优(+49.6%, 回撤-27.8%, 夏普0.31, 盈亏比2.48)
 PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才买(降换手实验)
+ALPHA_MODE = "trend"          # 选股 alpha 内核: "trend"(v4.8 买强/动量) | "lowvol_rev"(低波+反转+质量, 真 alpha 路线)
 
 
 class LocalBacktest:
@@ -90,6 +91,7 @@ class LocalBacktest:
             "ma20": ma20,   # B1/C1: 相对强度择时需逐股 MA
             "ma60": ma60,
             "min_close_5": close.rolling(5).min(),  # 近5日最低收盘价(回踩不破判定)
+            "vol20": chg.rolling(20).std(),  # 20日实现波动率(低波因子, 真 alpha 内核)
         }
         logger.info(f"动量矩阵完成: {close.shape[0]}天×{close.shape[1]}只, 耗时{time.time()-t0:.1f}s")
 
@@ -156,7 +158,7 @@ class LocalBacktest:
 
         # === M1a: 合并动量(从预计算矩阵, 历史回测真正生效) ===
         if self._mom_cache:
-            for col in ["chg_3d", "chg_6d", "chg_10d", "chg_25d", "change_pct"]:
+            for col in ["chg_3d", "chg_6d", "chg_10d", "chg_25d", "change_pct", "vol20"]:
                 frame = self._mom_cache.get(col)
                 if frame is not None and date_str in frame.index:
                     df[col] = df["code"].map(frame.loc[date_str])
@@ -215,6 +217,8 @@ class LocalBacktest:
 
     def score_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
         """评分：有基本面→factor_engine，纯价格→动量因子。"""
+        if ALPHA_MODE == "lowvol_rev":
+            return self._score_lowvol_rev(df)
         has_fundamentals = "market_cap" in df.columns and df["market_cap"].notna().sum() > 100
         if has_fundamentals:
             # M3+: 权重可由 config.backtest.factor_weights 覆盖, 便于调参
@@ -229,6 +233,55 @@ class LocalBacktest:
         else:
             s["composite_score"] = 0
         return s.sort_values("composite_score", ascending=False)
+
+    def _score_lowvol_rev(self, df: pd.DataFrame) -> pd.DataFrame:
+        """真 alpha 内核: 低波动(正) + 反转(买近期弱势/回调) + 质量 + 成长。
+
+        依据 alpha_research.py 诊断:
+          - 低波动是唯一稳健正 alpha (IC+0.11, 多空+23%/yr)
+          - 趋势/动量/RS 为反 alpha (IC 显著负) -> 改用「买近期弱势」反转
+          - 质量/成长 ≈ 零 alpha, 仅作风险稳定器
+        权重: 低波0.45 / 反转0.35 / 质量0.12 / 成长0.08
+        """
+        d = df.copy()
+        n = len(d)
+
+        # 1) 低波动: 波动率越低越好 -> (1 - 排名)
+        if "vol20" in d.columns:
+            s_vol = d["vol20"].rank(pct=True, na_option="keep")
+        else:
+            s_vol = pd.Series(0.5, index=d.index)
+        low_vol = (1 - s_vol.fillna(0.5))
+
+        # 2) 反转: 近期(10日)越弱越买(均值回归); IC 显著负即说明买弱胜买强
+        if "chg_10d" in d.columns:
+            s_rev = (-d["chg_10d"]).rank(pct=True, na_option="keep")
+        else:
+            s_rev = pd.Series(0.5, index=d.index)
+        reversal = s_rev.fillna(0.5)
+
+        # 3) 质量: ROE 越高越好, 负债率越低越好
+        s_q = pd.Series(0.5, index=d.index)
+        if "roe" in d.columns:
+            s_q = s_q + d["roe"].clip(-20, 40).fillna(0) / 40.0
+        if "debt_ratio" in d.columns:
+            s_q = s_q - (d["debt_ratio"].clip(0, 100).fillna(50) / 100.0)
+        s_q = s_q.rank(pct=True, na_option="keep").fillna(0.5)
+        quality = s_q
+
+        # 4) 成长: 营收增速越高越好(零 alpha, 稳定器)
+        if "revenue_growth" in d.columns:
+            s_g = d["revenue_growth"].clip(-50, 100).fillna(0).rank(pct=True, na_option="keep")
+        else:
+            s_g = pd.Series(0.5, index=d.index)
+        growth = s_g.fillna(0.5)
+
+        w = dict(vol=0.45, rev=0.35, q=0.12, g=0.08)
+        d["composite_score"] = (
+            w["vol"] * low_vol + w["rev"] * reversal +
+            w["q"] * quality + w["g"] * growth
+        )
+        return d.sort_values("composite_score", ascending=False)
 
     def pick_by_sector(self, df: pd.DataFrame, max_per: int = 5) -> list[dict]:
         """按板块分组选 Top N（委托 factor_engine）。"""
@@ -541,7 +594,9 @@ class LocalBacktest:
                     elif ma20 is not None and ma60 is not None and not trend_up:
                         reason = f"趋势破位({ret_pct:+.1f}%)"
                     # 4. 动态放弃(C1): 跌破 MA20 且已持有≥2天(留1天缓冲防噪音) → 放弃
-                    elif below_ma20 and held_days >= 2:
+                    #    lowvol_rev 模式: 入场即在 MA20 附近/下方, 此规则会首日即卖, 故跳过,
+                    #    改用规则#3(趋势破位 ma20<=ma60)作为「回调失败=破位」的离场信号
+                    elif ALPHA_MODE != "lowvol_rev" and below_ma20 and held_days >= 2:
                         reason = f"跌破MA20({ret_pct:+.1f}%)"
                     # 5. 移动止损(M2): 自高点回撤≥TRAIL_STOP_PCT 且曾盈利≥2% 才卖
                     elif held_days > 3 and peak_ret >= 2.0 and \
@@ -590,6 +645,11 @@ class LocalBacktest:
             if len(top) == 0:
                 continue
 
+            # 低波内核: 当日候选池波动率中位数(仅 lowvol_rev 模式用, 仅买低于中位数的"安静票")
+            vol_med = (float(top["vol20"].median())
+                       if "vol20" in top.columns and top["vol20"].notna().any()
+                       else float("inf"))
+
             buy_count = 0
             scores = top["composite_score"].values
             s_median = float(np.median(scores[scores == scores])) if len(scores) > 0 else 0
@@ -605,13 +665,26 @@ class LocalBacktest:
                 # B1: 相对强度择时 — 只买站上 MA20 的强势股; 若 MA60 可得且趋势向下则不买
                 ma20 = self.get_ma_on_date(code, date_str, 20)
                 ma60 = self.get_ma_on_date(code, date_str, 60)
-                if ma20 is not None and price < ma20:
-                    continue  # 跌破 MA20 的弱势股, 不买
-                if ma20 is not None and ma60 is not None and ma20 <= ma60:
-                    continue  # 下降趋势 (MA20 ≤ MA60), 不买
-                # 回踩不破守卫(降换手实验): 近5日曾破MA20(未站稳)则等确认后再买, 过滤假突破追高
-                if PULLBACK_GUARD and not bool(row.get("pullback_ok", True)):
-                    continue
+                if ALPHA_MODE == "lowvol_rev":
+                    # 反转入场: 上升趋势背景下买「回调」——股价回落至 MA20 附近/下方、
+                    # 但未破 MA60 长线支撑(非自由落体), 且仅买低波动票
+                    if ma20 is not None and ma60 is not None and ma20 <= ma60:
+                        continue  # 长趋势向下, 不买
+                    if ma20 is not None and price > ma20 * 1.02:
+                        continue  # 仍在高位未回调, 等回调
+                    if ma60 is not None and price < ma60 * 0.93:
+                        continue  # 跌破长线支撑(自由落体), 不买
+                    vol = row.get("vol20")
+                    if vol is not None and not pd.isna(vol) and vol > vol_med:
+                        continue  # 高波动票, 仅买低波动
+                else:
+                    if ma20 is not None and price < ma20:
+                        continue  # 跌破 MA20 的弱势股, 不买
+                    if ma20 is not None and ma60 is not None and ma20 <= ma60:
+                        continue  # 下降趋势 (MA20 ≤ MA60), 不买
+                    # 回踩不破守卫(降换手实验): 近5日曾破MA20(未站稳)则等确认后再买, 过滤假突破追高
+                    if PULLBACK_GUARD and not bool(row.get("pullback_ok", True)):
+                        continue
 
                 alloc = cash / max(MAX_PICKS_PER_DAY - buy_count, 1)
                 shares = int(alloc / price / 100) * 100
@@ -846,6 +919,8 @@ new Chart(document.getElementById('ddChart'),{{
 </body></html>"""
 
     tag = f"sl{STOP_LOSS:.0f}"
+    if ALPHA_MODE == "lowvol_rev":
+        tag += "_lvrev"
     if MIN_HOLD > 0:
         tag += f"_mh{MIN_HOLD}"
     if PULLBACK_GUARD:
@@ -873,8 +948,8 @@ def main():
     logger.info("本地数据回测启动")
     logger.info("=" * 60)
 
-    # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD
+    # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核) ----
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -882,12 +957,17 @@ def main():
                     help="最小持有期(天): 非硬止损卖出需持有>=N天, 覆盖默认 MIN_HOLD")
     ap.add_argument("--pullback-guard", action="store_true",
                     help="入场回踩不破守卫: 近5日最低价>=MA20 才买, 用于降换手对比")
+    ap.add_argument("--alpha-mode", choices=["trend", "lowvol_rev"], default=ALPHA_MODE,
+                    help="选股 alpha 内核: trend(v4.8买强/动量) | lowvol_rev(低波+反转+质量, 真 alpha 路线)")
     ap.add_argument("--skip-tn", action="store_true",
                     help="跳过 T+N 选股验证(run)，仅跑资金模拟，省时")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
     PULLBACK_GUARD = args.pullback_guard
+    ALPHA_MODE = args.alpha_mode
+    if ALPHA_MODE == "lowvol_rev":
+        logger.info("选股内核: 低波+反转+质量 (真 alpha 路线) — 反转入场/低波门槛/跳过跌破MA20卖出")
     if abs(STOP_LOSS - 8.0) > 1e-9:
         logger.info(f"覆盖止损线 STOP_LOSS = {STOP_LOSS}% (默认 8%)")
     if MIN_HOLD > 0:
@@ -937,7 +1017,8 @@ def main():
         portfolio = pf.get("portfolio", [])
         if portfolio:
             mh_tag = f"_mh{MIN_HOLD}" if MIN_HOLD > 0 else ""
-            csv_path = Path("briefs") / f"portfolio_curve_sl{STOP_LOSS:.0f}{mh_tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            lv_tag = "_lvrev" if ALPHA_MODE == "lowvol_rev" else ""
+            csv_path = Path("briefs") / f"portfolio_curve_sl{STOP_LOSS:.0f}{lv_tag}{mh_tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             csv_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(portfolio, columns=["date", "value"]).to_csv(csv_path, index=False)
             print(f"\n资产曲线: {csv_path}")
