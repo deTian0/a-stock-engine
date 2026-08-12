@@ -56,6 +56,7 @@ PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才�
 # 选股 alpha 内核: "trend"(v4.8 买强/动量, 仅作对照) | "lowvol_rev"(低波+反转+质量, 真 alpha 路线, 已固化默认)
 # 2026-08-12 固化: lvrev 内核改为"近20日超跌"口径, f_rs/f_trend 降为风控闸门; 叠加 L0 市场闸门(宽基MA200+估值分位)
 ALPHA_MODE = "lowvol_rev"
+VALUE_FACTOR = False          # lvrev 内核是否接入价值因子(bp/sp): False=默认关(回测 A-B=-10.3pt, 见 STRATEGY §8.6) | True=开(需 --value-factor)
 
 
 class LocalBacktest:
@@ -76,7 +77,28 @@ class LocalBacktest:
 
         历史回测原依赖 daily_snapshot_<date> 临时缓存(对历史全空), 导致因子失效、
         退化为纯 pct_chg 排名。这里从日线本身计算, 让动量因子在回测中真正生效。
+
+        落盘 pickle 缓存: 857万行透视约 688s, 重复跑回测极慢, 故按 (行数, 末日期)
+        签名缓存到 data_cache/mom_cache.pkl, 数据不变则秒级加载。
         """
+        import pickle, os
+        cache_file = os.path.join("data_cache", "mom_cache.pkl")
+        sig = self.raw_conn.execute(
+            "SELECT COUNT(*), MAX(date) FROM daily_price").fetchone()
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "rb") as f:
+                    blob = pickle.load(f)
+                if blob.get("sig") == sig:
+                    self._mom_cache = blob["cache"]
+                    _sample = self._mom_cache.get("chg_20d")
+                    logger.info(f"动量矩阵从缓存加载: "
+                                f"{_sample.shape[0]}天×{_sample.shape[1]}只")
+                    return
+                else:
+                    logger.info(f"动量缓存签名不匹配 {blob.get('sig')} != {sig}, 重建")
+            except Exception as e:
+                logger.warning(f"动量缓存读取失败, 重建: {e}")
         logger.info("预计算动量矩阵(close 透视)...")
         t0 = time.time()
         df = pd.read_sql(
@@ -98,6 +120,12 @@ class LocalBacktest:
             "min_close_5": close.rolling(5).min(),  # 近5日最低收盘价(回踩不破判定)
             "vol20": chg.rolling(20).std(),  # 20日实现波动率(低波因子, 真 alpha 内核)
         }
+        try:
+            os.makedirs("data_cache", exist_ok=True)
+            with open(cache_file, "wb") as f:
+                pickle.dump({"sig": sig, "cache": self._mom_cache}, f)
+        except Exception as e:
+            logger.warning(f"动量缓存写入失败(忽略): {e}")
         logger.info(f"动量矩阵完成: {close.shape[0]}天×{close.shape[1]}只, 耗时{time.time()-t0:.1f}s")
 
     def _build_pit_index(self):
@@ -324,13 +352,14 @@ class LocalBacktest:
         return s.sort_values("composite_score", ascending=False)
 
     def _score_lowvol_rev(self, df: pd.DataFrame) -> pd.DataFrame:
-        """真 alpha 内核: 低波动(正) + 反转(近20日超跌) + 质量 + 成长。
+        """真 alpha 内核: 低波动(正) + 反转(近20日超跌) + 价值(便宜) + 质量 + 成长。
 
-        依据 alpha_research.py 诊断:
+        依据 alpha_research.py 诊断(§7.1):
           - 低波动是唯一稳健正 alpha (IC+0.11, 多空+23%/yr)
+          - 价值(bp/sp)为第二正 alpha: bp IC+0.075 夏普0.60(最强), sp LS20+13.1%
           - 趋势/动量/RS 为反 alpha (IC 显著负) -> 改用「买近20日超跌」反转
           - 质量/成长 ≈ 零 alpha, 仅作风险稳定器
-        权重: 低波0.45 / 反转0.35 / 质量0.12 / 成长0.08
+        权重: 低波0.38 / 反转0.27 / 价值0.18 / 质量0.10 / 成长0.07
         入场口径见 run_portfolio: f_trend(MA20>MA60)硬闸门 + f_rs(相对强度)软闸门(不接飞刀)
           + 近20日超跌(底部30%分位)核心判据, 而非"买强"。
         """
@@ -370,10 +399,31 @@ class LocalBacktest:
             s_g = pd.Series(0.5, index=d.index)
         growth = s_g.fillna(0.5)
 
-        w = dict(vol=0.45, rev=0.35, q=0.12, g=0.08)
+        # 5) 价值(便宜): bp=1/pb(book yield) + sp=1/ps_ttm(sales yield), 越便宜越好
+        #    §7.1: bp IC+0.075 夏普0.60(价值因子中最强), sp LS20+13.1%; 二者方向均为正 alpha。
+        #    bp 权重高于 sp(0.6/0.4), 与诊断强度一致。VALUE_FACTOR=False 时退化为仅低波+反转+质量+成长。
+        if "pb" in d.columns and "ps_ttm" in d.columns:
+            bp_clean = d["pb"].where(d["pb"] > 0)
+            sp_clean = d["ps_ttm"].where(d["ps_ttm"] > 0)
+            bp_inv = 1.0 / bp_clean
+            sp_inv = 1.0 / sp_clean
+            s_val_bp = bp_inv.rank(pct=True, na_option="keep").fillna(0.5)
+            s_val_sp = sp_inv.rank(pct=True, na_option="keep").fillna(0.5)
+            value = (0.6 * s_val_bp + 0.4 * s_val_sp).fillna(0.5)
+        else:
+            value = pd.Series(0.5, index=d.index)
+
+        if VALUE_FACTOR:
+            # 新默认: 低波0.38/反转0.27/价值0.18/质量0.10/成长0.07
+            w = dict(vol=0.38, rev=0.27, value=0.18, q=0.10, g=0.07)
+        else:
+            # 价值因子关闭时, 将其权重按原比例回补到低波/反转, 还原 lvrev 原始权重
+            # (vol0.45/rev0.35/质量0.12/成长0.08), 使 A/B 干净隔离"价值因子"本身增量,
+            # 而非"权重再分配"效应(否则 OFF 组低波/反转被稀释, 与历史 +26.1% 基线不可比)。
+            w = dict(vol=0.45, rev=0.35, value=0.0, q=0.12, g=0.08)
         d["composite_score"] = (
             w["vol"] * low_vol + w["rev"] * reversal +
-            w["q"] * quality + w["g"] * growth
+            w["value"] * value + w["q"] * quality + w["g"] * growth
         )
         return d.sort_values("composite_score", ascending=False)
 
@@ -1084,8 +1134,8 @@ def main():
     logger.info("本地数据回测启动")
     logger.info("=" * 60)
 
-    # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE
+    # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核 / 价值因子) ----
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -1094,9 +1144,11 @@ def main():
     ap.add_argument("--pullback-guard", action="store_true",
                     help="入场回踩不破守卫: 近5日最低价>=MA20 才买, 用于降换手对比")
     ap.add_argument("--alpha-mode", choices=["trend", "lowvol_rev"], default=ALPHA_MODE,
-                    help="选股 alpha 内核: trend(v4.8买强/动量,对照) | lowvol_rev(低波+反转+质量, 真 alpha 路线, 默认)")
+                    help="选股 alpha 内核: trend(v4.8买强/动量,对照) | lowvol_rev(低波+反转+质量+价值, 真 alpha 路线, 默认)")
     ap.add_argument("--no-market-gate", action="store_true",
                     help="关闭 L0 市场闸门(宽基MA200+估值分位), 满仓对照, 用于 A/B 验证闸门贡献")
+    ap.add_argument("--value-factor", action="store_true",
+                    help="lvrev 内核开启价值因子(bp/sp): 默认关(回测净拖累-10.3pt, 见 STRATEGY §8.6), 此开关显式接入低波+便宜双重过滤")
     ap.add_argument("--skip-tn", action="store_true",
                     help="跳过 T+N 选股验证(run)，仅跑资金模拟，省时")
     args = ap.parse_args()
@@ -1105,8 +1157,11 @@ def main():
     PULLBACK_GUARD = args.pullback_guard
     ALPHA_MODE = args.alpha_mode
     MARKET_GATE = not args.no_market_gate
+    VALUE_FACTOR = args.value_factor
     if ALPHA_MODE == "lowvol_rev":
         logger.info("选股内核: 低波+反转+质量 (真 alpha 路线) — 近20日超跌/低波门槛/f_rs·f_trend降为闸门")
+        if VALUE_FACTOR:
+            logger.info("价值因子已开启 (--value-factor): 低波+反转+质量+价值(bp/sp 双重过滤)")
     if not MARKET_GATE:
         logger.info("L0 市场闸门: 已关闭 (满仓对照)")
     if abs(STOP_LOSS - 8.0) > 1e-9:

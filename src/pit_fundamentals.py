@@ -149,6 +149,7 @@ class PITFundamentals:
                 row["code"]: {
                     "pe": _num(row.get("pe")),
                     "pb": _num(row.get("pb")),
+                    "ps_ttm": _num(row.get("ps_ttm")),
                     "total_mv": _num(row.get("total_mv")),
                 }
                 for _, row in g.iterrows()
@@ -195,19 +196,21 @@ class PITFundamentals:
         codes = df["code"].tolist()
         closes = df["close"].tolist() if "close" in df.columns else [np.nan] * len(codes)
 
-        pe_l, pb_l, mcap_l = [], [], []
+        pe_l, pb_l, ps_l, mcap_l = [], [], [], []
         for code, close in zip(codes, closes):
             code = str(code).zfill(6)
-            pe = pb = mcap = np.nan
+            pe = pb = ps = mcap = np.nan
             if val_day and code in val_day:
                 vr = val_day[code]
                 pe = vr.get("pe") if vr.get("pe") is not None else np.nan
                 pb = vr.get("pb") if vr.get("pb") is not None else np.nan
+                ps = vr.get("ps_ttm") if vr.get("ps_ttm") is not None else np.nan
                 mcap = vr.get("total_mv") if vr.get("total_mv") is not None else np.nan
             else:
                 # 推导估值: 用该日 PIT 财务 + 当日收盘
                 # PE = close / 基本EPS(时点正确, 随报告期更新);
                 # PB = close / 每股净资产; market_cap = close × 股本(近似)
+                # ps_ttm 无 PIT 推导源(需营收TTM), 缺失日留 NaN(回测窗口 daily_basic_pit 全覆盖)
                 fin = self.financials_as_of(code, date_str)
                 if close and not np.isnan(close) and close > 0:
                     eps = fin.get("eps")
@@ -221,10 +224,12 @@ class PITFundamentals:
                         mcap = close * sh
             pe_l.append(pe)
             pb_l.append(pb)
+            ps_l.append(ps)
             mcap_l.append(mcap)
 
         df["pe"] = pe_l
         df["pb"] = pb_l
+        df["ps_ttm"] = ps_l
         df["market_cap"] = mcap_l
         return df
 
