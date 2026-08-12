@@ -20,14 +20,16 @@ logger = logging.getLogger(__name__)
 # 注意: key 必须与下方 f_ 因子列名一致! 旧版 config 用 momentum/pe_value 等无前缀名,
 #       导致 score_stocks 中 weights.get(col) 永远命中不到 → 全部回退 1/len 均权,
 #       调参彻底失效 (已修正 config 同步为 f_ 前缀)。
-# 设计: 相对强度(f_rs 0.18) + 趋势(f_trend 0.10) 主导, 估值(pe+pb 0.17)显著下调,
-#       质量降至0.05(规避 static 前视接盘), 见 B1/M6。
+# 设计: 相对强度(f_rs) + 趋势(f_trend) 在 alpha_research 中诊断为「反 alpha」(IC 显著负),
+#       2026-08-12 起权重已置 0 —— 不再贡献正分, 仅作为风控闸门(见 apply_risk_gates);
+#       估值(pe+pb 0.17)与低波(0.10)成为主要截面信号。真 alpha 路线见 local_backtest lvrev 内核。
+RISK_GATES = True        # f_rs/f_trend 降为风控闸门: 仅保留 uptrend + 非自由落体 的股票
 DEFAULT_WEIGHTS = {
     "f_momentum": 0.06,
     "f_momentum_25d": 0.05,
     "f_momentum_multi": 0.03,
-    "f_rs": 0.18,           # 相对强度(价格站上MA20) — 新增, 治 4/6 月反向
-    "f_trend": 0.10,        # 趋势(MA20>MA60) — 新增
+    "f_rs": 0.0,           # 相对强度: 权重归零(反 alpha), 仅作风控闸门(见 apply_risk_gates)
+    "f_trend": 0.0,        # 趋势: 权重归零(反 alpha), 仅作风控闸门(见 apply_risk_gates)
     "f_pe_value": 0.10,     # 估值下调(原0.12)
     "f_pb_value": 0.07,     # 估值下调(原0.08)
     "f_small_cap": 0.06,
@@ -131,7 +133,28 @@ def score_stocks(df: pd.DataFrame, weights: dict = None) -> pd.DataFrame:
     # 行业中性化
     s["composite_score"] = s["raw_score"] - s.groupby("sector")["raw_score"].transform("mean")
 
+    # f_rs / f_trend 已权重归零: 由「正分因子」降为「风控闸门」(仅过滤, 不评分)
+    if RISK_GATES:
+        s = apply_risk_gates(s)
+
     return s.sort_values("composite_score", ascending=False)
+
+
+def apply_risk_gates(df: pd.DataFrame) -> pd.DataFrame:
+    """把 f_trend(趋势) / f_rs(相对强度) 作为风控闸门而非评分因子。
+
+    alpha_research 诊断: 趋势/动量/RS 为反 alpha (Rank-IC 显著负), 用其「买强」会稳定亏钱。
+    故不再给正权重, 仅做两道硬过滤:
+      - f_trend 闸门: 仅保留 MA20>MA60(上升趋势) 的股票, 剔除明确下跌趋势;
+      - f_rs 软闸门: 剔除价格已远低于 MA20(rs20 < -8, 即自由落体) 的接飞刀票。
+    列缺失时自动跳过(不影响无均线数据的纯价格模式)。
+    """
+    c = df.copy()
+    if "trend_up" in c.columns:
+        c = c[c["trend_up"] == True]
+    if "rs20" in c.columns:
+        c = c[c["rs20"] >= -8.0]
+    return c
 
 
 def pick_top_by_sector(df: pd.DataFrame, max_per_sector: int = 5,

@@ -40,6 +40,8 @@ RISK_MAX_SECTOR_PCT = 20.0     # 单板块最大占比 (%)
 RISK_MAX_STOCK_PCT = 5.0
 T_PERIODS = [1, 3, 5]
 MARKET_MA = 60
+MARKET_MA200 = 200           # L0 市场闸门: 宽基代理指数 MA200(熊市判定)
+MARKET_GATE = True            # L0 市场闸门总开关 (--no-market-gate 关闭做 A/B)
 INITIAL_CAPITAL = 50000
 MAX_PICKS_PER_DAY = 8        # M4: 每日选股数 20→8 (降低分散度/换手)
 TRADE_COST = 0.0013          # 0.13% 交易成本 (股票: 万0.854+印花税)
@@ -51,7 +53,9 @@ MAX_POSITIONS = 15           # M4: 最大持仓数 (降低分散度)
 MAX_HOLD_DAYS = 60            # C1: 动态持有安全上限(极长持有才强制了结, 非正常退出)
 MIN_HOLD = 30                 # 最小持有期(天): 非硬止损卖出需持有>=N天 — v4.8 扫描5/10/15/20/25/30, mh30最优(+49.6%, 回撤-27.8%, 夏普0.31, 盈亏比2.48)
 PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才买(降换手实验)
-ALPHA_MODE = "trend"          # 选股 alpha 内核: "trend"(v4.8 买强/动量) | "lowvol_rev"(低波+反转+质量, 真 alpha 路线)
+# 选股 alpha 内核: "trend"(v4.8 买强/动量, 仅作对照) | "lowvol_rev"(低波+反转+质量, 真 alpha 路线, 已固化默认)
+# 2026-08-12 固化: lvrev 内核改为"近20日超跌"口径, f_rs/f_trend 降为风控闸门; 叠加 L0 市场闸门(宽基MA200+估值分位)
+ALPHA_MODE = "lowvol_rev"
 
 
 class LocalBacktest:
@@ -86,6 +90,7 @@ class LocalBacktest:
             "chg_3d": close.pct_change(3),
             "chg_6d": close.pct_change(6),
             "chg_10d": close.pct_change(10),
+            "chg_20d": close.pct_change(20),   # 近20日超跌(反转核心口径)
             "chg_25d": close.pct_change(25),
             "change_pct": chg,
             "ma20": ma20,   # B1/C1: 相对强度择时需逐股 MA
@@ -109,6 +114,90 @@ class LocalBacktest:
         except Exception as e:
             logger.warning(f"PIT 索引构建失败: {e}")
             self._pit = None
+
+    def _build_market_regime(self):
+        """L0 市场闸门: 宽基代理指数 MA200 + 估值分位 联合仓控, 压系统性回撤。
+
+        构造宽基代理指数(全体幸存者收盘价中位数, 抗小盘/上市潮扰动)→ MA200;
+        估值分位用 daily_basic_pit 全市场 pe_ttm 中位数在滚动3年窗口的百分位
+        (earnings yield 视角, 越高=越便宜)。二者合成每日仓位系数 mkt_scale:
+          - 指数 < MA200 (熊市)              → 0.0  清空权益、停止建仓(趋势对冲)
+          - 指数 >= MA200 且 昂贵(廉价分位<30%) → 0.5  半仓
+          - 指数 >= MA200 且 便宜(廉价分位>70%) → 1.0  满仓
+          - 其余(中性)                       → 0.75
+        MA200 预热期(<200日)或估值预热不足 → 视为参与(0.75), 不误杀。
+        long-only 无空头, 此闸门是压制 2022/2024 系统性回撤的关键(§8.4)。
+        """
+        import numpy as np
+        logger.info("构建 L0 市场闸门(宽基 MA200 + 估值分位)...")
+        t0 = time.time()
+        c = self.raw_conn
+        surv = self._compute_survivors()
+        # 统一为 6 位代码, 与 daily_basic_pit(纯6位) / 去后缀后的 daily_price 对齐,
+        # 否则带后缀的 surv 与 6 位码 isin 永远不匹配 -> mv 过滤成 0 行 -> 闸门变 no-op (已踩坑)
+        surv_s = {code.split(".")[0] for code in surv}
+
+        # 1) 宽基代理指数: 真实市值加权收益指数(非股价水平平均, 后者有成分漂移→假熊市)
+        #    每日按个股市值加权收益率复利: level_t = level_{t-1} * (1 + Σ w_i * r_i)
+        #    w_i = total_mv_i / Σ total_mv (来自 daily_basic_pit), 与去后缀 daily_price 对齐。
+        #    这是中证全指级别"宽基"的可信代理, 用于 L0 系统性回撤闸门。
+        dp = pd.read_sql("SELECT date, code, close FROM daily_price", c)
+        dp["code"] = dp["code"].str.replace(r"\.(SZ|SH|BJ)$", "", regex=True)
+        dp = dp[dp["code"].isin(surv_s)]
+        mv = pd.read_sql("SELECT trade_date, code, total_mv FROM daily_basic_pit WHERE total_mv > 0", c)
+        mv["code"] = mv["code"].astype(str).str.zfill(6)
+        mv = mv[mv["code"].isin(surv_s)]
+        close_p = dp.pivot(index="date", columns="code", values="close").sort_index()
+        mv_p = mv.pivot(index="trade_date", columns="code", values="total_mv").sort_index()
+        common = close_p.index.intersection(mv_p.index)
+        close_p = close_p.loc[common]
+        mv_p = mv_p.reindex(index=common, columns=close_p.columns)
+        rets = close_p.pct_change(1)                                 # 个股日收益
+        w = mv_p.div(mv_p.sum(axis=1, skipna=True), axis=0).fillna(0)  # 每日市值权重(axis=0广播!)
+        idx_ret = (rets * w).sum(axis=1).fillna(0)                   # 指数日收益
+        level = (1000.0 * (1.0 + idx_ret).cumprod()).sort_index()    # 指数点位(基准1000)
+        idx_ma200 = level.rolling(MARKET_MA200).mean()
+        # 自1年高点回撤(战术熊市判据, 比 MA200 更精准, 不误伤震荡/复苏段)
+        roll_max = level.rolling(252).max()
+        dd = (level / roll_max - 1.0)
+
+        # 2) 估值分位: 全市场 pe_ttm 中位数 → earnings yield 滚动3年百分位
+        val = pd.read_sql(
+            "SELECT trade_date, pe_ttm FROM daily_basic_pit WHERE pe_ttm > 0", c)
+        if len(val):
+            val = val.groupby("trade_date")["pe_ttm"].median().sort_index()
+            ey = (1.0 / val).replace([np.inf, -np.inf], np.nan)
+            win = 756  # ~3 年交易日
+            cheap_pct = ey.rolling(win).apply(
+                lambda x: float((x[-1] >= x).mean()), raw=True)
+        else:
+            cheap_pct = pd.Series(dtype=float)
+
+        # 3) 合成每日 mkt_scale — 压系统性回撤(§8.4 核心)
+        #    - 指数自1年高点回撤 > 12% (熊市)   → 0.0  清空权益、停止建仓
+        #    - 非熊市 且 市场极贵(廉价分位<20%) → 0.6  轻仓
+        #    - 其余(正常/便宜)                    → 1.0  满仓
+        #    MA200 仅作统计展示, 不单独触发清仓(避免2023震荡段被过度清空)
+        BEAR_DD = 0.12
+        scale = {}
+        for d in level.index:
+            dd_v = dd.get(d, np.nan)
+            if (not pd.isna(dd_v)) and dd_v <= -BEAR_DD:
+                scale[d] = 0.0          # 熊市(自1年高点回撤>12%) → 清空
+            else:
+                cp_v = cheap_pct.get(d, np.nan)
+                scale[d] = 0.6 if (not pd.isna(cp_v)) and cp_v < 0.20 else 1.0
+
+        self._mkt_scale = scale
+        self._mkt_ma200 = idx_ma200.to_dict()
+        self._mkt_cheap = cheap_pct.to_dict()
+        self._mkt_index = level.to_dict()
+        self._mkt_dd = dd.to_dict()
+        logger.info(f"L0 市场闸门就绪: 指数末值{level.iloc[-1]:.0f}, "
+                    f"熊市(回撤>{int(BEAR_DD*100)}%) {sum(1 for v in scale.values() if v<=0)}天, "
+                    f"耗时{time.time()-t0:.0f}s")
+        bear_days = sum(1 for v in scale.values() if v <= 0)
+        logger.info(f"L0 闸门完成: {bear_days}/{len(scale)} 天判定熊市(指数<MA200), 耗时{time.time()-t0:.1f}s")
 
     def _compute_survivors(self, min_days: int = 252) -> set:
         """幸存者偏差校正：排除上市<1年的新股和即将退市的。"""
@@ -158,7 +247,7 @@ class LocalBacktest:
 
         # === M1a: 合并动量(从预计算矩阵, 历史回测真正生效) ===
         if self._mom_cache:
-            for col in ["chg_3d", "chg_6d", "chg_10d", "chg_25d", "change_pct", "vol20"]:
+            for col in ["chg_3d", "chg_6d", "chg_10d", "chg_20d", "chg_25d", "change_pct", "vol20"]:
                 frame = self._mom_cache.get(col)
                 if frame is not None and date_str in frame.index:
                     df[col] = df["code"].map(frame.loc[date_str])
@@ -235,13 +324,15 @@ class LocalBacktest:
         return s.sort_values("composite_score", ascending=False)
 
     def _score_lowvol_rev(self, df: pd.DataFrame) -> pd.DataFrame:
-        """真 alpha 内核: 低波动(正) + 反转(买近期弱势/回调) + 质量 + 成长。
+        """真 alpha 内核: 低波动(正) + 反转(近20日超跌) + 质量 + 成长。
 
         依据 alpha_research.py 诊断:
           - 低波动是唯一稳健正 alpha (IC+0.11, 多空+23%/yr)
-          - 趋势/动量/RS 为反 alpha (IC 显著负) -> 改用「买近期弱势」反转
+          - 趋势/动量/RS 为反 alpha (IC 显著负) -> 改用「买近20日超跌」反转
           - 质量/成长 ≈ 零 alpha, 仅作风险稳定器
         权重: 低波0.45 / 反转0.35 / 质量0.12 / 成长0.08
+        入场口径见 run_portfolio: f_trend(MA20>MA60)硬闸门 + f_rs(相对强度)软闸门(不接飞刀)
+          + 近20日超跌(底部30%分位)核心判据, 而非"买强"。
         """
         d = df.copy()
         n = len(d)
@@ -253,8 +344,11 @@ class LocalBacktest:
             s_vol = pd.Series(0.5, index=d.index)
         low_vol = (1 - s_vol.fillna(0.5))
 
-        # 2) 反转: 近期(10日)越弱越买(均值回归); IC 显著负即说明买弱胜买强
-        if "chg_10d" in d.columns:
+        # 2) 反转: 近20日越超跌越买(均值回归) — "近20日超跌"口径; IC 显著负即说明买弱胜买强
+        #    chg_20d 是 alpha_research 中反 alpha 最强的动量窗口(IC20=-0.086), 反向即最强反转信号
+        if "chg_20d" in d.columns:
+            s_rev = (-d["chg_20d"]).rank(pct=True, na_option="keep")
+        elif "chg_10d" in d.columns:
             s_rev = (-d["chg_10d"]).rank(pct=True, na_option="keep")
         else:
             s_rev = pd.Series(0.5, index=d.index)
@@ -549,6 +643,13 @@ class LocalBacktest:
         ma60 = [sum(avg_vals[max(0,i-MARKET_MA+1):i+1])/min(i+1,MARKET_MA) for i in range(len(all_dates))]
         regime = {all_dates[i]: avg_vals[i] > ma60[i] for i in range(len(all_dates))}
 
+        # L0 市场闸门(宽基MA200 + 估值分位) — 压系统性回撤(§8.4)
+        if MARKET_GATE:
+            self._build_market_regime()
+            mkt_scale = self._mkt_scale
+        else:
+            mkt_scale = {d: 1.0 for d in all_dates}  # --no-market-gate: 满仓对照
+
         cash = float(cap)
         positions = {}  # {code: {buy_price, shares, target, stop, hold_days, entry_idx, score}}
         portfolio = []
@@ -562,6 +663,10 @@ class LocalBacktest:
                 logger.info(f"  进度: {di+1}/{len(all_dates)} | 持仓{len(positions)} | 现金{cash:,.0f}")
 
             # === 每日持仓评估 (C1: 动态持有决策, 取消固定到期) ===
+            # L0 市场闸门(每日): 熊市(广基指数自1年高点回撤>12%) → bear=True, 强制清仓且不新建仓
+            mscale = mkt_scale.get(date_str, 1.0)
+            bear = (mscale <= 0.0)
+
             to_sell = []
             for code, pos in list(positions.items()):
                 cur_price = self.get_price_on_date(code, date_str)
@@ -582,8 +687,11 @@ class LocalBacktest:
 
                 reason = None
                 cr = self._trade_cost(code)
+                # 0. L0 市场熊市闸门(绕过MIN_HOLD): 广基指数自1年高点回撤>12% 强制清仓, 压系统性回撤
+                if bear:
+                    reason = "市场熊市清仓(回撤>12%)"
                 # 1. 硬止损 (始终允许, 保命, 不受最小持有期约束)
-                if ret_pct <= -STOP_LOSS:
+                elif ret_pct <= -STOP_LOSS:
                     reason = f"止损({ret_pct:+.1f}%)"
                 # 其余主动卖出需满足最小持有期(降换手实验: 避免短线频繁进出)
                 elif held_days >= MIN_HOLD:
@@ -629,6 +737,8 @@ class LocalBacktest:
             # === 入场判断 ===
             if not regime.get(date_str, True):
                 continue
+            if bear:           # L0: 熊市不清仓外不新建仓
+                continue
             if cash < 5000:  # 资金太少不买
                 continue
             if len(positions) >= MAX_POSITIONS:  # M4: 持仓已满不买
@@ -645,10 +755,14 @@ class LocalBacktest:
             if len(top) == 0:
                 continue
 
-            # 低波内核: 当日候选池波动率中位数(仅 lowvol_rev 模式用, 仅买低于中位数的"安静票")
-            vol_med = (float(top["vol20"].median())
-                       if "vol20" in top.columns and top["vol20"].notna().any()
+            # 低波内核门槛: 当日全市场波动率中位数(仅买低于中位数的"安静票")
+            vol_med = (float(df["vol20"].median())
+                       if "vol20" in df.columns and df["vol20"].notna().any()
                        else float("inf"))
+            # 近20日超跌门槛: 全市场 chg_20d 底部30%分位(自适应: 牛/熊市均判为超跌)
+            chg20_q30 = (float(df["chg_20d"].quantile(0.30))
+                         if "chg_20d" in df.columns and df["chg_20d"].notna().any()
+                         else -0.05)
 
             buy_count = 0
             scores = top["composite_score"].values
@@ -666,14 +780,20 @@ class LocalBacktest:
                 ma20 = self.get_ma_on_date(code, date_str, 20)
                 ma60 = self.get_ma_on_date(code, date_str, 60)
                 if ALPHA_MODE == "lowvol_rev":
-                    # 反转入场: 上升趋势背景下买「回调」——股价回落至 MA20 附近/下方、
-                    # 但未破 MA60 长线支撑(非自由落体), 且仅买低波动票
+                    # --- f_trend 降为硬闸门(原正向权重已置0): 仅长趋势向上才考虑 ---
                     if ma20 is not None and ma60 is not None and ma20 <= ma60:
-                        continue  # 长趋势向下, 不买
-                    if ma20 is not None and price > ma20 * 1.02:
-                        continue  # 仍在高位未回调, 等回调
+                        continue  # 长趋势向下(MA20≤MA60) → 不买
+                    # --- f_rs 降为软闸门(不接远离MA20的飞刀, 而非"必须站上均线买强") ---
+                    if ma20 is not None and price < ma20 * 0.93:
+                        continue  # 已远低于MA20(自由落体), 不接飞刀
+                    # --- 近20日超跌(反转核心判据): 仅买底部30%分位的超跌票 ---
+                    chg20 = row.get("chg_20d")
+                    if chg20 is not None and not pd.isna(chg20) and chg20 > chg20_q30:
+                        continue  # 近20日未达超跌(>底部30%分位) → 非反转候选
+                    # --- 自由落体兜底(MA60 长线支撑) ---
                     if ma60 is not None and price < ma60 * 0.93:
-                        continue  # 跌破长线支撑(自由落体), 不买
+                        continue  # 跌破长线支撑, 不买
+                    # --- 低波门槛(真alpha内核) ---
                     vol = row.get("vol20")
                     if vol is not None and not pd.isna(vol) and vol > vol_med:
                         continue  # 高波动票, 仅买低波动
@@ -686,7 +806,7 @@ class LocalBacktest:
                     if PULLBACK_GUARD and not bool(row.get("pullback_ok", True)):
                         continue
 
-                alloc = cash / max(MAX_PICKS_PER_DAY - buy_count, 1)
+                alloc = cash * mscale / max(MAX_PICKS_PER_DAY - buy_count, 1)
                 shares = int(alloc / price / 100) * 100
                 if shares < 100:
                     continue
@@ -793,6 +913,20 @@ class LocalBacktest:
                            "avg_win": round(avg_win, 2), "avg_loss": round(avg_loss, 2),
                            "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio != float("inf") else None,
                            "net_return_dist": dist},
+            "market_gate": self._market_gate_stats(),
+        }
+
+    def _market_gate_stats(self) -> dict:
+        """汇总 L0 市场闸门每日仓位系数分布(供报告展示)。"""
+        if not MARKET_GATE or not hasattr(self, "_mkt_scale"):
+            return {"enabled": False}
+        sc = self._mkt_scale
+        return {
+            "enabled": True,
+            "bear_days": sum(1 for v in sc.values() if v <= 0.0),
+            "full_days": sum(1 for v in sc.values() if v >= 1.0),
+            "light_days": sum(1 for v in sc.values() if 0 < v < 1.0),
+            "total_days": len(sc),
         }
 
 
@@ -831,6 +965,7 @@ def generate_html_report(pf: dict, config: dict) -> str:
     ) if dist else ""
     win_rate = sell.get("win_rate", 0)
     pl_ratio = sell.get("profit_loss_ratio")
+    mg = pf.get("market_gate", {"enabled": False})
 
     html = f"""<!DOCTYPE html>
 <html lang=\"zh-CN\">
@@ -874,6 +1009,7 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
   <div class=\"card\"><div class=\"label\">最大回撤</div><div class=\"value green\">-{pf['max_drawdown_pct']:.1f}%</div></div>
   <div class=\"card\"><div class=\"label\">夏普比率</div><div class=\"value blue\">{pf['sharpe']}</div></div>
   <div class=\"card\"><div class=\"label\">买卖胜率(净)</div><div class=\"value {'red' if win_rate<50 else 'green'}\">{win_rate:.1f}%</div></div>
+  <div class=\"card\"><div class=\"label\">L0市场闸门</div><div class=\"value blue\">{('熊市'+str(mg.get('bear_days',0))+'天') if mg.get('enabled') else '关闭'}</div></div>
 </div>
 
 <div class=\"chart-container\"><h3>资产曲线</h3><canvas id=\"equityChart\"></canvas></div>
@@ -949,7 +1085,7 @@ def main():
     logger.info("=" * 60)
 
     # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -958,7 +1094,9 @@ def main():
     ap.add_argument("--pullback-guard", action="store_true",
                     help="入场回踩不破守卫: 近5日最低价>=MA20 才买, 用于降换手对比")
     ap.add_argument("--alpha-mode", choices=["trend", "lowvol_rev"], default=ALPHA_MODE,
-                    help="选股 alpha 内核: trend(v4.8买强/动量) | lowvol_rev(低波+反转+质量, 真 alpha 路线)")
+                    help="选股 alpha 内核: trend(v4.8买强/动量,对照) | lowvol_rev(低波+反转+质量, 真 alpha 路线, 默认)")
+    ap.add_argument("--no-market-gate", action="store_true",
+                    help="关闭 L0 市场闸门(宽基MA200+估值分位), 满仓对照, 用于 A/B 验证闸门贡献")
     ap.add_argument("--skip-tn", action="store_true",
                     help="跳过 T+N 选股验证(run)，仅跑资金模拟，省时")
     args = ap.parse_args()
@@ -966,8 +1104,11 @@ def main():
     MIN_HOLD = max(0, args.min_hold)
     PULLBACK_GUARD = args.pullback_guard
     ALPHA_MODE = args.alpha_mode
+    MARKET_GATE = not args.no_market_gate
     if ALPHA_MODE == "lowvol_rev":
-        logger.info("选股内核: 低波+反转+质量 (真 alpha 路线) — 反转入场/低波门槛/跳过跌破MA20卖出")
+        logger.info("选股内核: 低波+反转+质量 (真 alpha 路线) — 近20日超跌/低波门槛/f_rs·f_trend降为闸门")
+    if not MARKET_GATE:
+        logger.info("L0 市场闸门: 已关闭 (满仓对照)")
     if abs(STOP_LOSS - 8.0) > 1e-9:
         logger.info(f"覆盖止损线 STOP_LOSS = {STOP_LOSS}% (默认 8%)")
     if MIN_HOLD > 0:
