@@ -98,8 +98,38 @@ def merge_pit(df):
 
     for j, c in enumerate(fcols):
         df[c] = out[:, j]
-    df["earn_yield"] = np.where(df["close"] > 0, df["eps_ttm"] / df["close"], np.nan)
     return df.drop(columns=["_c", "_dt"])
+
+
+def merge_valuation(df):
+    """PIT 合并估值: 直接用 daily_basic_pit 的 trade_date==T (估值即 T 日收盘时点, 天然 PIT 正确, 无前瞻)。
+
+    价值因子(方向统一为"越大越便宜越好"):
+      ey = 1/pe_ttm (盈利收益率), bp = 1/pb (账面市值比), sp = 1/ps_ttm (市销率倒数), dy = 股息率
+    """
+    con = sqlite3.connect(str(DB))
+    val = pd.read_sql_query(
+        "SELECT code, trade_date, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio "
+        "FROM daily_basic_pit", con)
+    con.close()
+    if len(val) == 0:
+        print("  [警告] daily_basic_pit 为空, 价值因子将全部为 NaN (请先运行估值采集)")
+        for c in ("ey", "bp", "sp", "dy"):
+            df[c] = np.nan
+        return df
+    val["code"] = val["code"].astype(str).str.zfill(6)
+    val["date"] = val["trade_date"].astype(str)
+    val["ey"] = np.where(val["pe_ttm"] > 0, 1.0 / val["pe_ttm"], np.nan)
+    val["bp"] = np.where(val["pb"] > 0, 1.0 / val["pb"], np.nan)
+    val["sp"] = np.where(val["ps_ttm"] > 0, 1.0 / val["ps_ttm"], np.nan)
+    val["dy"] = val["dv_ratio"]
+    # join key 统一为 6 位无后缀(price 的 code 带 .SZ/.SH, valuation 为纯 6 位)
+    df = df.copy()
+    df["_c"] = (df["code"].astype(str)
+                .str.replace(r"\.(SZ|SH|BJ)$", "", regex=True).str.zfill(6))
+    val2 = val[["code", "date", "ey", "bp", "sp", "dy"]].rename(columns={"code": "_c"})
+    out = df.merge(val2, on=["_c", "date"], how="left")
+    return out.drop(columns=["_c"])
 
 
 def ic_from_ranks(rf, ry, dates):
@@ -146,6 +176,8 @@ def main():
     df = add_price_factors(df)
     print("合并 PIT 基本面 ...")
     df = merge_pit(df)
+    print("合并 PIT 估值(daily_basic_pit) ...")
+    df = merge_valuation(df)
     df = df[(df["amount"] >= LIQ) & (df["close"] > 0)].copy()
     print(f"  过滤后(日成交额>={LIQ/1e6:.0f}M): {len(df):,} 行")
 
@@ -155,7 +187,10 @@ def main():
         "rs20":          ("相对强度RS", +1),
         "trend_up":      ("趋势MA20>MA60", +1),
         "vol20":         ("低波动(反向)", -1),
-        "earn_yield":    ("盈利收益率(价值)", +1),
+        "ey":            ("盈利收益率1/PEttm(价值)", +1),
+        "bp":            ("账面市值比1/PB(价值)", +1),
+        "sp":            ("市销率倒数1/PS(价值)", +1),
+        "dy":            ("股息率(价值)", +1),
         "roe":           ("ROE(质量)", +1),
         "gross_margin":  ("毛利率(质量)", +1),
         "debt_ratio":    ("负债率(反向)", -1),
@@ -227,7 +262,8 @@ def main():
 
     # 当前 DEFAULT_WEIGHTS 合成
     cur_w = {"chg_10d": 0.06, "chg_25d": 0.05, "rs20": 0.18, "trend_up": 0.10,
-             "vol20": -0.10, "earn_yield": 0.10, "roe": 0.03, "gross_margin": 0.02,
+             "vol20": -0.10, "ey": 0.06, "bp": 0.03, "sp": 0.03, "dy": 0.03,
+             "roe": 0.03, "gross_margin": 0.02,
              "debt_ratio": -0.02, "revenue_growth": 0.015, "profit_growth": 0.015}
     avail = {k: v for k, v in cur_w.items() if scols.get(k) in df.columns}
     wsum = sum(abs(v) for v in avail.values()) or 1
