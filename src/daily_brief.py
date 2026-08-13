@@ -501,26 +501,38 @@ def main():
         brief_content = generate_brief(results, config)
         brief_path = save_brief(brief_content, config)
 
-        # 记录命中追踪
+        # 记录命中追踪（股票 + ETF 一并追踪）
         try:
-            all_picks = pd.concat(
-                [df for df in results["categories"].values() if df is not None and len(df) > 0],
-                ignore_index=True
-            )
-            if len(all_picks) > 0:
-                # 补齐名称：从 L4 结果或 stock_list 中查找
-                l4 = results.get("l4_results", pd.DataFrame())
-                name_map = {}
-                for _, r in l4.iterrows():
-                    n = r.get("name", "")
-                    if n and str(n).lower() not in ("nan", "none", ""):
-                        name_map[str(r["code"]).zfill(6)] = n
-                # L4没找到的从 stock_list 补齐
-                if "name" in all_picks.columns:
-                    all_picks["name"] = all_picks.apply(
-                        lambda r: name_map.get(str(r["code"]).zfill(6), r["code"]), axis=1
-                    )
-                track_picks(all_picks, session_type=args.session)
+            frames = [
+                df for df in results["categories"].values()
+                if df is not None and len(df) > 0
+            ]
+            # ETF 组合也进入追踪周期（含 code/name 列）
+            etf_picks = results.get("etf_picks", pd.DataFrame())
+            if etf_picks is not None and len(etf_picks) > 0:
+                if "code" in etf_picks.columns:
+                    cols = [c for c in ("code", "name") if c in etf_picks.columns]
+                    frames.append(etf_picks[cols].copy())
+
+            if frames:
+                all_picks = pd.concat(frames, ignore_index=True)
+                if len(all_picks) > 0:
+                    # 补齐名称：从 L4 结果查找；已有名称(含ETF)予以保留，缺失才回退 code
+                    l4 = results.get("l4_results", pd.DataFrame())
+                    name_map = {}
+                    for _, r in l4.iterrows():
+                        n = r.get("name", "")
+                        if n and str(n).lower() not in ("nan", "none", ""):
+                            name_map[str(r["code"]).zfill(6)] = n
+
+                    def _fill_name(r):
+                        nm = r.get("name", "")
+                        if nm and str(nm).lower() not in ("nan", "none", ""):
+                            return nm
+                        return name_map.get(str(r["code"]).zfill(6), str(r["code"]).zfill(6))
+
+                    all_picks["name"] = all_picks.apply(_fill_name, axis=1)
+                    track_picks(all_picks, session_type=args.session)
         except Exception as e:
             logger.warning(f"命中追踪记录失败: {e}")
 
