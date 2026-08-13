@@ -267,8 +267,10 @@ class LocalBacktest:
         if self._survivors is not None:
             return self._survivors
         c = self.raw_conn
+        # 排除北交所(.BJ 后缀: 83/87/88/43/92 前缀均属北京系, daily_price 统一带 .BJ 后缀)
         rows = c.execute(
-            "SELECT code, COUNT(*) as cnt FROM daily_price GROUP BY code HAVING cnt >= ?",
+            "SELECT code, COUNT(*) as cnt FROM daily_price "
+            "WHERE code NOT LIKE '%.BJ' GROUP BY code HAVING cnt >= ?",
             (min_days,)
         ).fetchall()
         self._survivors = {r[0] for r in rows}

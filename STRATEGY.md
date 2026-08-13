@@ -11,8 +11,9 @@
 本地数据驱动的 A 股 **long-only 多因子 + 相对强度择时** 回测框架。
 
 - **数据来源**：本地 SQLite `data_cache/market.db`（不进 git，本地永久缓存）。
-  - `daily_price`：全市场日线（约 857 万行，1546 交易日 × 7254 只）。
+  - `daily_price`：沪深日线（约 830 万行，1546 交易日 × ~6400 只；**北交所已全量清除**，见下）。
   - `fundamentals_pit`：PIT 时点基本面（322,688 行，1990–2026 全报告期）。
+  - **选股宇宙排除北交所**：北京系股票（代码 `.BJ` 后缀 / 83·87·88·43·92 前缀，含北交所优先股与老三板）一律不进入回测与实盘筛选。2026-08-13 起 `market.db` 已清除全部北交所数据（daily_price 27.2万行 + daily_basic_pit 23.0万行 + fundamentals_pit 1.07万行 + fundamentals 306 行），并在 `local_backtest._compute_survivors`、`import_local_data`、`collect_fundamentals`、`collect_pit_fundamentals`、`tushare_provider`、`akshare_provider` 各摄入层固化 `.BJ` 排除，防止重采写回。
 - **核心思想**：用「截至回测日 T 已公告」的财报 + 动量/均线择时，做截面打分选股，动态持有、趋势破位离场。
 - **PIT（Point-In-Time）基本面**：按 `ann_date ≤ T` 二分取当时截面，从根消除「用未来财报选历史股票」的前视偏差（M6 修复）。
 - **估值推导**：`daily_basic_pit` 暂空，估值以 `close(T) ÷ PIT 财务` 推导，同样 PIT 正确。

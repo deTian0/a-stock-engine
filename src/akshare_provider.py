@@ -95,7 +95,9 @@ class AkshareProvider:
 
             df = df.rename(columns={"代码": "code", "名称": "name"})
             df["code"] = df["code"].astype(str).str.zfill(6)
-            logger.info(f"akshare: 获取股票列表 {len(df)} 只")
+            # 排除北交所(.BJ 前缀 83/87/88/43/92 等): 仅保留沪深主板+创业板+基金
+            df = df[df["code"].str.startswith(("0", "1", "3", "5", "6"))]
+            logger.info(f"akshare: 获取股票列表 {len(df)} 只(已剔除北交所)")
             self.db.cache_put(cache_key, "stock_list", df, self._source, self._cache_ttl)
             return df
         except Exception as e:

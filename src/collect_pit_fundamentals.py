@@ -176,6 +176,7 @@ def collect(pro, db, do_fin: bool = True, do_val: bool = False,
         # 基础列表 -> ts_code
         basic = pro.stock_basic(exchange="", list_status="L",
                                 fields="ts_code,symbol,name,area,industry,market,list_date")
+        basic = basic[~basic["ts_code"].str.endswith(".BJ")].copy()  # 剔除北交所(北京系)
         basic["code"] = basic["ts_code"].apply(_from_ts_code)
         if codes_filter:
             cf = [c.zfill(6) for c in codes_filter]
@@ -221,6 +222,7 @@ def main():
         # dry-run 仅验证财务拉取
         basic = pro.stock_basic(exchange="", list_status="L",
                                 fields="ts_code,symbol,name")
+        basic = basic[~basic["ts_code"].str.endswith(".BJ")].copy()  # 剔除北交所(北京系)
         basic["code"] = basic["ts_code"].apply(_from_ts_code)
         if codes_filter:
             basic = basic[basic["code"].isin([c.zfill(6) for c in codes_filter])]

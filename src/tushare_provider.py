@@ -149,6 +149,7 @@ class TushareProvider:
                         fields="ts_code,close,pe,pb,total_mv,circ_mv,volume_ratio,turnover_rate"
                     )
                     if valuation is not None and len(valuation) > 0:
+                        valuation = valuation[~valuation["ts_code"].str.endswith(".BJ")].copy()  # 剔除北交所
                         valuation["code"] = valuation["ts_code"].apply(_from_ts_code)
                         # tushare total_mv 单位: 万元 → 元
                         valuation["market_cap"] = valuation["total_mv"] * 10000
@@ -157,6 +158,7 @@ class TushareProvider:
                         try:
                             daily_raw = self.pro.daily(trade_date=latest_date)
                             if daily_raw is not None and len(daily_raw) > 0:
+                                daily_raw = daily_raw[~daily_raw["ts_code"].str.endswith(".BJ")].copy()  # 剔除北交所
                                 daily_raw["code"] = daily_raw["ts_code"].apply(_from_ts_code)
                                 # 涨跌幅映射
                                 pct_map = {}

@@ -50,8 +50,11 @@ def fetch_stock_basic(pro) -> pd.DataFrame:
     )
     if basic is None or len(basic) == 0:
         raise RuntimeError("stock_basic 返回空")
+    # 排除北交所(.BJ): 北京系股票(83/87/88/43/92 等)不进入引擎
+    n_bj = int(basic["ts_code"].str.endswith(".BJ").sum()) if "ts_code" in basic else 0
+    basic = basic[~basic["ts_code"].str.endswith(".BJ")].copy()
     basic["code"] = basic["ts_code"].apply(_from_ts_code)
-    logger.info(f"stock_basic: {len(basic)} 只")
+    logger.info(f"stock_basic: {len(basic)} 只 (剔除北交所 {n_bj} 只)")
     return basic
 
 
@@ -86,7 +89,11 @@ def fetch_daily_basic(pro) -> pd.DataFrame:
     if not frames:
         raise RuntimeError("daily_basic 返回空")
     val = pd.concat(frames, ignore_index=True)
+    # 排除北交所(.BJ): 不进入估值/市值矩阵
+    n_bj = int(val["ts_code"].str.endswith(".BJ").sum()) if "ts_code" in val else 0
+    val = val[~val["ts_code"].str.endswith(".BJ")].copy()
     val["code"] = val["ts_code"].apply(_from_ts_code)
+    logger.info(f"daily_basic: {len(val)} 只 (剔除北交所 {n_bj} 只, 交易日 {trade_date})")
     # 万元 → 元
     for col in ("total_mv", "circ_mv"):
         if col in val.columns:

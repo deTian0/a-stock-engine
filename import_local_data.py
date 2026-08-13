@@ -186,6 +186,8 @@ def import_parquet_prices(db, base_dir: str):
                 continue
 
             df["code"] = df["code"].astype(str).str.zfill(6)
+            # 排除北交所(北京系: 83/87/88 北交所, 43 老三板/NEEQ, 92 优先股)
+            df = df[~df["code"].str.startswith(("83", "87", "88", "43", "92"))]
             rows = [
                 (str(r.code), date_str,
                  float(r.close) if pd.notna(r.close) else 0.0,
