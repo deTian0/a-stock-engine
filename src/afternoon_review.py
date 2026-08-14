@@ -89,20 +89,34 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
         # 排除北交所
         codes = stock_list["code"].astype(str).str.zfill(6)
         stock_list = stock_list[codes.str.startswith(("0","1","3","5","6"))]
-        # 注入 westock-data 实时涨跌幅（tushare 不含 change_pct）
-        if "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all():
-            from westock_helpers import batch_change_pct
-            chg_map = batch_change_pct(stock_list["code"].astype(str).str.zfill(6).tolist())
-            if chg_map:
-                stock_list["change_pct"] = stock_list["code"].astype(str).str.zfill(6).map(chg_map)
-                logger.info(f"已注入westock涨跌幅: {stock_list['change_pct'].notna().sum()} 只")
-        stock_list["sector"] = stock_list["code"].map(sector_mapping).fillna("综合")
-        sector_agg = stock_list.groupby("sector").agg(
-            avg_chg=("change_pct", "mean"),
-            total_amt=("amount", "sum"),
-            stock_count=("code", "count"),
-            max_chg=("change_pct", "max"),
-        ).reset_index()
+        # 注入 westock-data 实时行情（tushare/新浪回退列表可能缺 change_pct/close/amount）
+        _quote_cols = ["change_pct", "close", "amount", "volume", "volume_ratio", "amplitude"]
+        _need_quotes = (
+            "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all()
+            or "close" not in stock_list.columns or stock_list["close"].isna().all()
+            or "amount" not in stock_list.columns or stock_list["amount"].isna().all()
+        )
+        if _need_quotes:
+            from westock_helpers import batch_quotes
+            quote_map = batch_quotes(stock_list["code"].astype(str).str.zfill(6).tolist())
+            if quote_map:
+                qdf = pd.DataFrame.from_dict(quote_map, orient="index").reset_index().rename(columns={"index": "code"})
+                qdf["code"] = qdf["code"].astype(str).str.zfill(6)
+                qmap = qdf.set_index("code")
+                codes_z = stock_list["code"].astype(str).str.zfill(6)
+                for col in _quote_cols:
+                    if col in qdf.columns and (col not in stock_list.columns or stock_list[col].isna().all()):
+                        stock_list[col] = codes_z.map(qmap[col])
+                logger.info(f"已注入westock实时行情: {len(quote_map)} 只 (涨跌幅覆盖 {stock_list['change_pct'].notna().sum()} 只)")
+        stock_list["sector"] = stock_list["code"].astype(str).str.zfill(6).map(sector_mapping).fillna("综合")
+        agg_spec = {
+            "avg_chg": ("change_pct", "mean"),
+            "stock_count": ("code", "count"),
+            "max_chg": ("change_pct", "max"),
+        }
+        if "amount" in stock_list.columns:
+            agg_spec["total_amt"] = ("amount", "sum")
+        sector_agg = stock_list.groupby("sector").agg(**agg_spec).reset_index()
         sector_agg = sector_agg[sector_agg["stock_count"] >= 3]  # 至少3只股票
         top_sectors = sector_agg.nlargest(5, "avg_chg")
 
@@ -326,7 +340,7 @@ def _batch_preload_prices(codes: list[str], config: dict,
         placeholders = ",".join("?" for _ in batch)
         rows = mdb.conn.execute(f"""
             SELECT code, close FROM daily_price
-            WHERE code IN ({placeholders})
+            WHERE substr(code, 1, 6) IN ({placeholders})
             ORDER BY code, date DESC
         """, batch).fetchall()
         from collections import defaultdict
@@ -353,10 +367,11 @@ def _batch_preload_prices(codes: list[str], config: dict,
                 closes = df["close"].tolist()
                 # 写回 DB
                 rows_to_insert = []
+                _sfx = "SH" if code.startswith(("6", "9")) else ("SZ" if code.startswith(("0", "2", "3")) else "BJ")
                 for _, r in df.iterrows():
                     date = str(r.get("date", ""))[:10]
                     rows_to_insert.append((
-                        f"{code}.SZ", date,
+                        f"{code}.{_sfx}", date,
                         float(r.get("close", 0)),
                         float(r.get("change_pct", 0)) if pd.notna(r.get("change_pct")) else 0,
                         float(r.get("volume", 0)) if pd.notna(r.get("volume")) else 0,
@@ -753,6 +768,9 @@ def main():
     try:
         # 预取全市场数据（用于板块聚合 + T+0验证 + 盘后追踪）
         all_stocks = cli.get_stock_list()
+        # 归一化 code 为 6 位字符串（缓存 round-trip 可能丢失前导零）
+        if len(all_stocks) > 0 and "code" in all_stocks.columns:
+            all_stocks["code"] = all_stocks["code"].astype(str).str.zfill(6)
         codes_for_prices = []
         if len(all_stocks) > 0 and "code" in all_stocks.columns:
             codes_for_prices = all_stocks.nlargest(50, "change_pct")["code"].tolist() if "change_pct" in all_stocks.columns else all_stocks["code"].head(300).tolist()

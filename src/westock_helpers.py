@@ -85,6 +85,78 @@ def batch_change_pct(codes: list[str]) -> dict[str, float]:
     return changes
 
 
+def batch_quotes(codes: list[str]) -> dict[str, dict]:
+    """
+    批量获取当日实时行情。返回 {code: {close, change_pct, amount, volume, volume_ratio, amplitude}}。
+    通过 kline limit=2 拿今日+昨日，推导涨跌幅/量比/振幅（westock 的 exchange 列是换手率，非涨跌幅）。
+    用于新浪/回退股票列表缺失实时字段时的全市场补全。
+    """
+    from collections import defaultdict
+
+    result = {}
+    batch_size = 100
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i:i + batch_size]
+        ws_codes = ",".join(_to_ws(c) for c in batch)
+        try:
+            r = subprocess.run(
+                [_NPX, "-y", "westock-data-skillhub@1.0.5",
+                 "kline", ws_codes, "--period", "day", "--limit", "2"],
+                capture_output=True, text=True, timeout=90,
+                encoding=_ENCODING, errors="replace"
+            )
+            if r.returncode != 0 or not r.stdout:
+                continue
+            # 列: | symbol | date | open | last | high | low | volume | amount | exchange |
+            tmp = defaultdict(list)
+            for line in r.stdout.strip().split("\n"):
+                if "|" not in line or "symbol" in line or "Batch" in line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 9:
+                    continue
+                sym = parts[1].replace("sh", "").replace("sz", "").replace("bj", "").zfill(6)
+                try:
+                    close = float(parts[4])   # last
+                    high = float(parts[5])
+                    low = float(parts[6])
+                    volume = float(parts[7])
+                    amount = float(parts[8])
+                except (ValueError, IndexError):
+                    continue
+                tmp[sym].append((close, high, low, volume, amount))
+            for sym, rows in tmp.items():
+                if not rows:
+                    continue
+                close, high, low, volume, amount = rows[0]
+                if len(rows) >= 2:
+                    prev_close = rows[1][0]
+                    prev_vol = rows[1][3]
+                else:
+                    prev_close = 0.0
+                    prev_vol = 0.0
+                chg = round((close / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
+                vol_ratio = round(volume / prev_vol, 2) if prev_vol > 0 else 1.0
+                amp = round((high - low) / prev_close * 100, 2) if prev_close > 0 else 0.0
+                result[sym] = {
+                    "close": close,
+                    "change_pct": chg,
+                    "amount": amount,
+                    "volume": volume,
+                    "volume_ratio": vol_ratio,
+                    "amplitude": amp,
+                }
+        except FileNotFoundError:
+            logger.error(f"npx 未找到于 {_NPX}，请确认 WorkBuddy Node.js 安装")
+            break
+        except Exception as e:
+            logger.warning(f"westock quotes 批次失败: {e}")
+            continue
+
+    logger.info(f"westock batch quotes: {len(result)}/{len(codes)} 只")
+    return result
+
+
 def batch_tech_indicators(codes: list[str]) -> dict[str, dict]:
     """
     批量获取技术指标: MA均线 + MACD + RSI。

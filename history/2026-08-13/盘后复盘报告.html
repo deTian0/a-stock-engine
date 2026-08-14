@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>盘后复盘报告 — 2026-08-13</title>
+
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f5f7fa;color:#333;padding:20px;max-width:1200px;margin:0 auto}}
+.header{{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:24px;border-radius:12px;margin-bottom:20px}}
+.header h1{{font-size:22px;margin-bottom:8px}}
+.header .meta{{opacity:.85;font-size:14px}}
+.summary{{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}}
+.card{{background:#fff;border-radius:10px;padding:16px 20px;flex:1;min-width:160px;box-shadow:0 2px 8px rgba(0,0,0,.06)}}
+.card .label{{font-size:12px;color:#999;margin-bottom:4px}}
+.card .value{{font-size:24px;font-weight:700}}
+.card.ok{{border-left:3px solid #67c23a}}
+.card.info{{border-left:3px solid #409eff}}
+.card.warn{{border-left:3px solid #f56c6c}}
+.charts{{display:grid;grid-template-columns:1fr;gap:16px;margin-bottom:20px}}
+.chart-box{{background:#fff;border-radius:10px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);height:320px}}
+.section{{background:#fff;border-radius:10px;padding:20px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.06)}}
+.section h2{{font-size:18px;margin-bottom:12px;color:#667eea}}
+.section h3{{font-size:15px;margin:16px 0 8px;color:#409eff}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th{{background:#f0f2f5;padding:8px 6px;text-align:left;font-weight:600;border-bottom:2px solid #e4e7ed;white-space:nowrap}}
+td{{padding:6px;border-bottom:1px solid #ebeef5}}
+tr:hover{{background:#f5f7fa}}
+.up{{color:#f56c6c;font-weight:600}}
+.down{{color:#67c23a;font-weight:600}}
+.tag{{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;background:#ecf5ff;color:#409eff}}
+.footer{{text-align:center;color:#999;font-size:12px;padding:16px}}
+.track-h2{{font-size:17px;color:#764ba2;margin:18px 0 10px;border-left:3px solid #764ba2;padding-left:10px}}
+.track-h3{{font-size:15px;color:#409eff;margin:14px 0 8px}}
+ul{{margin:6px 0 6px 20px}}
+li{{margin:3px 0}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📊 盘后复盘报告 — 2026-08-13</h1>
+  <div class="meta">生成时间: 15:29 | 数据来源: a-stock-engine afternoon_review</div>
+</div>
+
+<div class="summary"><div class="card info"><div class="label">最强板块</div><div class="value">综合</div></div><div class="card ok"><div class="label">上榜板块</div><div class="value">1 个</div></div><div class="card warn"><div class="label">T+0 验证</div><div class="value">1 只</div></div><div class="card ok"><div class="label">累计命中</div><div class="value">229 次</div></div></div>
+
+<div class="charts">
+  <div class="chart-box"><div id="chartSector" style="width:100%;height:100%"></div></div>
+</div>
+
+<div class="section">
+  <h2>🏆 一、今日最强板块 Top 5</h2>
+  <table><tr><th>板块</th><th>平均涨幅</th><th>股票数</th><th>龙头涨幅</th><th>成交额(亿)</th></tr><tr><td><b>综合</b></td><td class="down">-1.0%</td><td>5209</td><td class="up">+20.0%</td><td>21522.7615526391</td></tr></table>
+</div>
+
+<div class="section">
+  <h2>🔥 二、各板块最强个股</h2>
+  <h3>综合</h3><table><tr><th>代码</th><th>名称</th><th>股价</th><th>一手价</th><th>涨幅</th><th>量比</th><th>成交额(亿)</th><th>动因</th></tr><tr><td>300404</td><td>博济医药</td><td>12.04</td><td>1204</td><td class="up">+20.0%</td><td>1.28</td><td>6.0205876057</td><td><span class='tag'>综合板块联动</span></td></tr><tr><td>300862</td><td>蓝盾光电</td><td>32.84</td><td>3284</td><td class="up">+20.0%</td><td>0.29</td><td>0.6819357360000001</td><td><span class='tag'>综合板块联动</span></td></tr><tr><td>688265</td><td>南模生物</td><td>43.68</td><td>4368</td><td class="up">+20.0%</td><td>1.18</td><td>1.87817582</td><td><span class='tag'>综合板块联动</span></td></tr><tr><td>688137</td><td>近岸蛋白</td><td>53.33</td><td>5333</td><td class="up">+20.0%</td><td>1.31</td><td>3.29411869</td><td><span class='tag'>综合板块联动</span></td></tr><tr><td>301520</td><td>万邦医药</td><td>73.9</td><td>7390</td><td class="up">+20.0%</td><td>1.2</td><td>14.699590311</td><td><span class='tag'>综合板块联动</span></td></tr></table>
+</div>
+
+<div class="section">
+  <h2>✅ 三、早盘推荐 T+0 验证</h2>
+  <p style="color:#666">早盘 run_id=140, 2026-08-10</p><h3>③C_观察名单</h3><table><tr><th>代码</th><th>名称</th><th>选股评分</th><th>T+0表现</th><th>建议</th></tr><tr><td>48</td><td>48</td><td>0.0</td><td class="down">-</td><td class="">-</td></tr></table>
+</div>
+
+<div class="section">
+  <h2>📈 四、选股命中统计</h2>
+  <ul><li>累计追踪: 170 只股票, 229 次命中, 170 个周期</li><li>活跃周期: 170 只正在追踪中</li><li>周期内多次命中: 58 只 (高频信号)</li><li>高频股票: 002847, 600519, 001386, 001391, 600610</li></ul><h3>盘前累计命中 Top 5</h3><table><tr><th>代码</th><th>累计命中</th><th>周期数</th><th>当前周期内</th><th>最近命中</th></tr><tr><td>002847</td><td>3</td><td>1</td><td>3</td><td>2026-08-13</td></tr><tr><td>600519</td><td>2</td><td>1</td><td>2</td><td>2026-08-13</td></tr><tr><td>001386</td><td>2</td><td>1</td><td>2</td><td>2026-08-11</td></tr><tr><td>001391</td><td>2</td><td>1</td><td>2</td><td>2026-08-13</td></tr><tr><td>600610</td><td>2</td><td>1</td><td>2</td><td>2026-08-11</td></tr></table><h3>盘后累计命中 Top 5</h3><table><tr><th>代码</th><th>累计命中</th><th>最近命中</th></tr><tr><td>000007</td><td>2</td><td>2026-08-11</td></tr><tr><td>000011</td><td>2</td><td>2026-08-11</td></tr><tr><td>000019</td><td>2</td><td>2026-08-11</td></tr><tr><td>001872</td><td>2</td><td>2026-08-11</td></tr><tr><td>000029</td><td>2</td><td>2026-08-11</td></tr></table>
+</div>
+
+<div class="section">
+  <h2>🎯 五、选股命中追踪</h2>
+  <h2 class='track-h2'>选股命中追踪</h2>
+<h3 class='track-h3'>盘前累计命中 Top 10</h3>
+<table><tr><th>代码</th><th>名称</th><th>累计命中</th><th>周期数</th><th>当前周期内</th><th>周期状态</th><th>最近命中</th></tr><tr><td>002847</td><td>盐津铺子</td><td>3</td><td>1</td><td>3</td><td>🟢 追踪中</td><td>2026-08-13</td></tr><tr><td>600519</td><td>贵州茅台</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-13</td></tr><tr><td>001386</td><td>马可波罗</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>001391</td><td>国货航</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-13</td></tr><tr><td>600610</td><td>中毅达</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000151</td><td>中成股份</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000421</td><td>南京公用</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>603106</td><td>恒银科技</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000712</td><td>锦龙股份</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>002052</td><td>同洲电子</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr></table>
+<h3 class='track-h3'>盘前当前周期高频命中</h3>
+<table><tr><th>代码</th><th>名称</th><th>周期内命中</th><th>累计</th><th>周期开始</th><th>周期截止</th></tr><tr><td>002847</td><td>盐津铺子</td><td>3</td><td>3</td><td>2026-08-10</td><td>2026-08-27</td></tr><tr><td>600519</td><td>贵州茅台</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-27</td></tr><tr><td>001386</td><td>马可波罗</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>001391</td><td>国货航</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-27</td></tr><tr><td>600610</td><td>中毅达</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000151</td><td>中成股份</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000421</td><td>南京公用</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>603106</td><td>恒银科技</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000712</td><td>锦龙股份</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>002052</td><td>同洲电子</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr></table>
+<h3 class='track-h3'>盘后累计命中 Top 10</h3>
+<table><tr><th>代码</th><th>名称</th><th>累计命中</th><th>周期数</th><th>当前周期内</th><th>周期状态</th><th>最近命中</th></tr><tr><td>000007</td><td>全新好</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000011</td><td>深物业A</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000019</td><td>深粮控股</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>001872</td><td>招商港口</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000029</td><td>深深房A</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000030</td><td>富奥股份</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000032</td><td>深桑达A</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000037</td><td>深南电A</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000042</td><td>中洲控股</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr><tr><td>000001</td><td>平安银行</td><td>2</td><td>1</td><td>2</td><td>🟢 追踪中</td><td>2026-08-11</td></tr></table>
+<h3 class='track-h3'>盘后当前周期高频命中</h3>
+<table><tr><th>代码</th><th>名称</th><th>周期内命中</th><th>累计</th><th>周期开始</th><th>周期截止</th></tr><tr><td>000007</td><td>全新好</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000011</td><td>深物业A</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000019</td><td>深粮控股</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>001872</td><td>招商港口</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000029</td><td>深深房A</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000030</td><td>富奥股份</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000032</td><td>深桑达A</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000037</td><td>深南电A</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000042</td><td>中洲控股</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr><tr><td>000001</td><td>平安银行</td><td>2</td><td>2</td><td>2026-08-10</td><td>2026-08-25</td></tr></table>
+<p>---</p>
+<p>**总计**: 盘前 170 只(229 次) | 盘后 91 只(121 次)</p>
+</div>
+
+<div class="footer">🚀 自动生成于 2026-08-13 15:32 | Powered by a-stock-engine</div>
+
+<script>
+(function(){
+  var c = echarts.init(document.getElementById('chartSector'));
+  c.setOption({
+    title: {text:'板块平均涨幅 Top 5', left:'center', textStyle:{fontSize:14}},
+    tooltip: {trigger:'axis', formatter:'{b}<br/>平均涨幅: {c}%'},
+    grid: {left:60, right:30, top:40, bottom:60},
+    xAxis: {type:'category', data:['综合'], axisLabel:{interval:0, rotate:20, fontSize:11}},
+    yAxis: {type:'value', axisLabel:{formatter:'{value}%'}},
+    series: [{type:'bar', data:[-1.036178221624736], barWidth:'45%',
+      itemStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+        {offset:0,color:'#f56c6c'},{offset:1,color:'#764ba2'}])},
+      label:{show:true, position:'top', formatter:'{c}%', fontSize:11}}]
+  });
+  window.addEventListener('resize', function(){ c.resize(); });
+})();
+</script>
+</body></html>
