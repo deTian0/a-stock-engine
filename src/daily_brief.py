@@ -44,7 +44,7 @@ def generate_brief(results: dict, config: dict) -> str:
     # 篮子仓位分配配置
     brief_cfg = config.get("brief", {})
     sleeve_weights = brief_cfg.get(
-        "sleeve_weights", {"quality": 0.50, "short_term": 0.30, "etf": 0.20})
+        "sleeve_weights", {"quality": 0.50, "short_term": 0.20, "etf": 0.30})
     alloc_method = brief_cfg.get("method", "score_weighted")
     max_single = brief_cfg.get("max_single_position", 0.08)
 
