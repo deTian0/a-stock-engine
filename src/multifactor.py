@@ -809,12 +809,32 @@ class MultiFactorEngine:
         else:
             quality = pd.DataFrame()
 
-        # ②B 短线榜：动量最强 或 反弹引擎选出的
+        # ②B 短线榜：复用 lvrev 真 alpha 内核 + 入场闸门(消灭反 alpha 动量买强)
+        #   旧逻辑 l4_results.nlargest(short_n, "momentum_20d") 是「买强」，
+        #   而 A 股动量/趋势已被证伪为反 alpha(Rank-IC 显著负)；②A 已用 lvrev 内核，
+        #   ②B 必须同源：从 l4_results 排除 ②A 头部后，优先选 entry_ok=True
+        #   (趋势向上 MA20>MA60 + 不接飞刀 + 低波门槛 + 底部超跌) 的票做短线，
+        #   不足则补 lvrev 次优(composite_score 降序)。
         short_list = pd.DataFrame()
-        if len(l4_results) > 0 and "momentum_20d" in l4_results.columns:
-            short_list = l4_results.nlargest(short_n, "momentum_20d").copy()
-        if len(rebound_picks) > 0:
-            short_list = pd.concat([short_list, rebound_picks], ignore_index=True)
+        if len(l4_results) > 0:
+            qa_codes = set()
+            if "code" in l4_results.columns and len(l4_results) > 0:
+                qa_codes = set(l4_results.head(quality_n)["code"].tolist())
+            rest = (l4_results[~l4_results["code"].isin(qa_codes)].copy()
+                    if "code" in l4_results.columns
+                    else l4_results.copy())
+            # 优先 entry_ok 通过的(到买点 / 低波底部反转 / 趋势向上)
+            if "entry_ok" in rest.columns and bool(rest["entry_ok"].any()):
+                passed = rest[rest["entry_ok"]].sort_values(
+                    "composite_score", ascending=False)
+                short_list = passed.head(short_n).copy()
+            # 不足 short_n 则用 lvrev 次优(composite_score)补足, 仍排除 ②A 头部
+            if len(short_list) < short_n:
+                used = (set(short_list["code"].tolist())
+                        if len(short_list) and "code" in short_list.columns else set())
+                remain = rest[~rest["code"].isin(used)] if "code" in rest.columns else rest
+                filler = remain.sort_values("composite_score", ascending=False).head(short_n - len(short_list))
+                short_list = pd.concat([short_list, filler], ignore_index=True) if len(filler) else short_list
 
         # ③A 持仓：当前账户中的持仓
         holding_codes = list(holdings.keys()) if holdings else []

@@ -113,6 +113,14 @@ output:
   quality_top_n: 10               # ②A质量榜数量
   short_term_top_n: 5             # ②B短线榜数量
   watchlist_top_n: 23             # ③C观察名单数量
+  # 篮子仓位权重(占「环境上限」的比例, 和=1): 实盘校准(2026-08-14)
+  #   - etf 0.20->0.30: 用户实盘 ETF 表现稳健(白名单+分散+顺势+低磨), 提升占比
+  #   - short_term 0.30->0.20: ②B 原动量买强=反 alpha, 降权压暴露
+  #   - quality 0.50 不变: lvrev 真 alpha 内核, 中长线质量 drift
+  sleeve_weights:
+    quality: 0.50
+    short_term: 0.20
+    etf: 0.30
 
 # --- 数据源 ---
 data_source:

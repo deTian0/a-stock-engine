@@ -69,14 +69,16 @@ def generate_brief(results: dict, config: dict) -> str:
         return max(excess - cost * 100, -cost * 100)  # 扣磨损, 不低于成本
 
     def _hold_period(row):
-        """根据因子判断建议持仓周期。"""
+        """根据因子判断建议持仓周期。优先采用 lvrev 内核的 entry_ok 闸门。"""
         roe = row.get("roe", 0)
         mom20 = row.get("momentum_20d", 0)
         score = row.get("composite_score", 50)
-        # 高ROE+稳定动量 → 中长线; 纯动量驱动 → 短线
-        if pd.notna(roe) and roe > 10 and score > 75:
+        entry_ok = row.get("entry_ok", False)
+        # lvrev 内核 entry_ok(趋势向上 MA20>MA60 + 低波 + 不接飞刀 + 底部超跌)
+        # 或 高ROE质量票 → 中长线(质量 drift, 已验证 T+2 +2.86%)
+        if entry_ok or (pd.notna(roe) and roe > 10 and score > 70):
             return "中长线(5-20日)"
-        elif pd.notna(mom20) and abs(mom20) < 5 and score > 70:
+        elif pd.notna(mom20) and abs(mom20) < 5 and score > 65:
             return "中长线(5-15日)"
         else:
             return "短线(1-5日)"
