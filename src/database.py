@@ -334,7 +334,12 @@ class StockDB:
             if cat_df is None or len(cat_df) == 0:
                 continue
             for _, row in cat_df.iterrows():
-                code = row.get("code", "")
+                # 标准化 code 为 6 位字符串，杜绝 '6' 与 '000006' 并存的历史 bug
+                code_raw = row.get("code", "")
+                code = str(code_raw).strip()
+                code = code.split(".")[0] if "." in code else code
+                if code.isdigit():
+                    code = code.zfill(6)
                 rows.append((
                     run_id, today, code,
                     str(row.get("name", code)),
@@ -470,26 +475,44 @@ class StockDB:
 
     def save_t2_verification(self, pick_date: str, verifications: list[dict]) -> int:
         """
-        保存 T+2 验证结果。
+        保存 T+2 验证结果（**幂等**：按 pick_date+code+category 去重，重跑不累加）。
         verifications: list of {code, name, t0_close, t2_close, return_pct, status, category}
         category 为空时（如 mini_backtest 旧调用）默认 ""，向后兼容。
+        code 统一规范为 6 位，杜绝 '6' 与 '000006' 并存。
         """
         if not verifications:
             return 0
 
         c = self.conn
         rows = []
+        dedup_keys = set()
         for v in verifications:
+            # 标准化 code -> 6 位
+            code_raw = v.get("code", "")
+            code = str(code_raw).strip()
+            code = code.split(".")[0] if "." in code else code
+            if code.isdigit():
+                code = code.zfill(6)
+            category = v.get("category", "")
+            dedup_keys.add((pick_date, code, category))
+            name = code if str(v.get("name", "")).isdigit() else v.get("name", "")
             rows.append((
-                v.get("code", ""),
-                v.get("name", ""),
+                code,
+                name,
                 pick_date,
                 v.get("t0_close"),
                 v.get("t2_close"),
                 v.get("return_pct"),
                 v.get("status", ""),
-                v.get("category", ""),
+                category,
             ))
+
+        # 幂等：先删同键旧记录，避免重跑无限累加 / 残留去零副本
+        for pk, cd, ct in dedup_keys:
+            c.execute(
+                "DELETE FROM t2_verifications WHERE pick_date=? AND code=? AND category=?",
+                (pk, cd, ct),
+            )
 
         c.executemany("""
             INSERT INTO t2_verifications
@@ -498,7 +521,7 @@ class StockDB:
         """, rows)
         c.commit()
 
-        logger.info(f"T+2验证已入库: {pick_date}, {len(rows)} 条")
+        logger.info(f"T+2验证已入库: {pick_date}, {len(rows)} 条（幂等去重）")
         return len(rows)
 
     # ============================================

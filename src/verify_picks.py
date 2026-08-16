@@ -44,6 +44,20 @@ _SECTION_TO_CAT = {
 }
 
 
+def norm_code(code) -> str:
+    """标准化 A股/ETF 代码为 6 位字符串（去前导零/后缀、零填充）。
+
+    解决历史库中同标的以 '000006' 与 '6' 两种格式重复存储的问题：
+    入库与验证两侧统一走此函数，保证 '6'→'000006' 坍缩为同一键，
+    避免同一股票在胜率统计里被重复计数。
+    """
+    s = str(code).strip()
+    s = s.split(".")[0] if "." in s else s
+    if s.isdigit():
+        s = s.zfill(6)
+    return s
+
+
 def load_picks_from_brief(brief_path: Path) -> list[dict]:
     """从简报 Markdown 提取「推荐买入」候选：仅 ②A中长线 / ②B短线 / ETF 三段。
 
@@ -74,10 +88,10 @@ def load_picks_from_brief(brief_path: Path) -> list[dict]:
         if line.startswith("|") and "---" not in line:
             cells = [c.strip() for c in line.split("|")]
             if len(cells) >= 3:
-                code = cells[1]
+                code = norm_code(cells[1])
                 name = cells[2]
-                # 6 位数字代码（含 ETF，如 515790）
-                if code.isdigit() and len(code) == 6:
+                # 6 位数字代码（含 ETF，如 515790）；norm_code 已零填充
+                if code and code.isdigit() and len(code) == 6:
                     if code not in [p["code"] for p in picks]:
                         picks.append({"code": code, "name": name, "category": current_cat})
 
@@ -136,12 +150,18 @@ def verify_date(date_str: str, briefs_dir: Path = None) -> dict:
       2) Markdown 简报：白名单三段（ETF 未持久化到 stock_picks，靠简报补足）。
     """
     picks = []
-    seen = set()
+    seen = set()  # key = (规范化code, category)
 
     def _add(code, name, category):
-        if code and code not in seen:
-            seen.add(code)
-            picks.append({"code": code, "name": name, "category": category})
+        nc = norm_code(code)
+        if not nc:
+            return
+        key = (nc, category)
+        if key not in seen:
+            seen.add(key)
+            # 名称规范化：若 name 本身是纯数字（去零副本 '6'），同步为 6 位代码
+            nm = nc if (name and str(name).isdigit()) else (name or nc)
+            picks.append({"code": nc, "name": nm, "category": category})
 
     # 1) SQLite 主源：仅买入类目
     try:
