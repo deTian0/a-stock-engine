@@ -809,7 +809,10 @@ def main():
             if len(all_stocks) > 0 and "change_pct" in all_stocks.columns:
                 top_gainers = all_stocks.nlargest(30, "change_pct")
                 if "code" in top_gainers.columns:
-                    track_picks(top_gainers, session_type="post_market")
+                    # 盘后追踪 = 当日涨幅前30强势股观察(非买入候选), 标注观察类目
+                    # 避免未来再写 NULL(与历史补标 ④盘后强势股观察 一致)
+                    track_picks(top_gainers, session_type="post_market",
+                                category="④盘后强势股观察")
         except Exception as e:
             logger.debug(f"盘后追踪记录跳过: {e}")
 
