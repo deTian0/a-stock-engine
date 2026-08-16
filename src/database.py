@@ -300,6 +300,13 @@ class StockDB:
         except sqlite3.OperationalError:
             pass  # 列已存在
 
+        # v4.14: t2_verifications 增加 category 列（区分买入类目, 支撑纯"推荐买入"胜率分桶）
+        try:
+            c.execute("ALTER TABLE t2_verifications ADD COLUMN category TEXT")
+            c.commit()
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+
         logger.info("数据库初始化完成")
 
     # ============================================
@@ -464,7 +471,8 @@ class StockDB:
     def save_t2_verification(self, pick_date: str, verifications: list[dict]) -> int:
         """
         保存 T+2 验证结果。
-        verifications: list of {code, name, t0_close, t2_close, return_pct, status}
+        verifications: list of {code, name, t0_close, t2_close, return_pct, status, category}
+        category 为空时（如 mini_backtest 旧调用）默认 ""，向后兼容。
         """
         if not verifications:
             return 0
@@ -480,12 +488,13 @@ class StockDB:
                 v.get("t2_close"),
                 v.get("return_pct"),
                 v.get("status", ""),
+                v.get("category", ""),
             ))
 
         c.executemany("""
             INSERT INTO t2_verifications
-            (code, name, pick_date, t0_close, t2_close, return_pct, status)
-            VALUES (?,?,?,?,?,?,?)
+            (code, name, pick_date, t0_close, t2_close, return_pct, status, category)
+            VALUES (?,?,?,?,?,?,?,?)
         """, rows)
         c.commit()
 
