@@ -503,12 +503,16 @@ def main():
         brief_content = generate_brief(results, config)
         brief_path = save_brief(brief_content, config)
 
-        # 记录命中追踪（股票 + ETF 一并追踪）
+        # 记录命中追踪（仅追踪"可执行买入候选": ②A质量榜 + ②B短线榜 + ETF）
+        # 不再追踪 ③C观察名单(23只弱分观察, 非买入建议)与 ③A持仓/③B卖出建议,
+        # 避免每日把大量弱分观察名计入胜率分母、摊薄统计。
         try:
-            frames = [
-                df for df in results["categories"].values()
-                if df is not None and len(df) > 0
-            ]
+            cats = results.get("categories", {})
+            frames = []
+            for key in ("②A_质量榜", "②B_短线榜"):
+                df = cats.get(key)
+                if df is not None and len(df) > 0:
+                    frames.append(df)
             # ETF 组合也进入追踪周期（含 code/name 列）
             etf_picks = results.get("etf_picks", pd.DataFrame())
             if etf_picks is not None and len(etf_picks) > 0:

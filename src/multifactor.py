@@ -649,6 +649,12 @@ class MultiFactorEngine:
         keep = apply_entry_gates(scored, reversal_q=self.lvrev_reversal_q)
         scored["entry_ok"] = keep.reindex(scored.index).fillna(False).values
 
+        # 内核 composite_score ∈ [0,1](百分位权重和); 盘前链路(信号档位 ≥80/≥65、
+        # _net_return 的 score-50、_hold_period 的 >70/>65、allocate_basket 相对权重)
+        # 全部按 [0,100] 假设, 故此处统一 ×100 还原百分制。仅为展示/阈值语义对齐,
+        # 不影响内核排名数学(排序由相对大小决定)。
+        scored["composite_score"] = (scored["composite_score"] * 100).round(2)
+
         # 默认不硬过滤(保证 ②A 有候选); 显式开启则只保留 entry_ok 的
         if self.lvrev_apply_gate:
             scored = scored[scored["entry_ok"]]
@@ -802,10 +808,19 @@ class MultiFactorEngine:
         quality_n = out_cfg.get("quality_top_n", 10)
         short_n = out_cfg.get("short_term_top_n", 5)
         watch_n = out_cfg.get("watchlist_top_n", 23)
+        # 最低评分门槛: 过滤 composite_score 低于阈值的票, 避免"低分入选推荐"拖低胜率。
+        # 作用于 ②A/②B/③C 推荐类目; 持仓(③A)与卖出建议(③B)不受影响。默认 60(百分制)。
+        min_score = out_cfg.get("min_composite_score", 0)
+        rec = l4_results
+        if min_score > 0 and len(l4_results) > 0 and "composite_score" in l4_results.columns:
+            rec = l4_results[l4_results["composite_score"] >= min_score].copy()
+            dropped = len(l4_results) - len(rec)
+            if dropped > 0:
+                logger.info(f"  最低评分门槛 {min_score}: 过滤 {dropped} 只低分票(剩 {len(rec)})")
 
         # ②A 质量榜：综合评分最高的N只
-        if len(l4_results) > 0:
-            quality = l4_results.head(quality_n).copy()
+        if len(rec) > 0:
+            quality = rec.head(quality_n).copy()
         else:
             quality = pd.DataFrame()
 
@@ -816,13 +831,13 @@ class MultiFactorEngine:
         #   (趋势向上 MA20>MA60 + 不接飞刀 + 低波门槛 + 底部超跌) 的票做短线，
         #   不足则补 lvrev 次优(composite_score 降序)。
         short_list = pd.DataFrame()
-        if len(l4_results) > 0:
+        if len(rec) > 0:
             qa_codes = set()
-            if "code" in l4_results.columns and len(l4_results) > 0:
-                qa_codes = set(l4_results.head(quality_n)["code"].tolist())
-            rest = (l4_results[~l4_results["code"].isin(qa_codes)].copy()
-                    if "code" in l4_results.columns
-                    else l4_results.copy())
+            if "code" in rec.columns and len(rec) > 0:
+                qa_codes = set(rec.head(quality_n)["code"].tolist())
+            rest = (rec[~rec["code"].isin(qa_codes)].copy()
+                    if "code" in rec.columns
+                    else rec.copy())
             # 优先 entry_ok 通过的(到买点 / 低波底部反转 / 趋势向上)
             if "entry_ok" in rest.columns and bool(rest["entry_ok"].any()):
                 passed = rest[rest["entry_ok"]].sort_values(
@@ -850,9 +865,9 @@ class MultiFactorEngine:
             median_score = l4_results["composite_score"].median()
             sell_list = holdings_df[holdings_df["composite_score"] < median_score].copy()
 
-        # ③C 观察名单：评分靠前但未入质量榜的
-        if len(l4_results) > quality_n:
-            watchlist = l4_results.iloc[quality_n:quality_n + watch_n].copy()
+        # ③C 观察名单：评分靠前但未入质量榜的(已受 min_score 过滤)
+        if len(rec) > quality_n:
+            watchlist = rec.iloc[quality_n:quality_n + watch_n].copy()
         else:
             watchlist = pd.DataFrame()
 
