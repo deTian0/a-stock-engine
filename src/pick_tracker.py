@@ -90,8 +90,13 @@ def _init_tracking_schema(db):
     CREATE INDEX IF NOT EXISTS idx_pick_trk_date    ON pick_tracking(pick_date);
     CREATE INDEX IF NOT EXISTS idx_pick_trk_code    ON pick_tracking(code, session_type);
     CREATE INDEX IF NOT EXISTS idx_pick_trk_cycle   ON pick_tracking(cycle_id);
-    CREATE INDEX IF NOT EXISTS idx_pick_sum_session ON pick_summary(session_type, cumulative_hits DESC);
+        CREATE INDEX IF NOT EXISTS idx_pick_sum_session ON pick_summary(session_type, cumulative_hits DESC);
     """)
+    # 兼容旧库: 补齐 category 列(2026-08-16 新增, 区分②A/②B/③C/ETF来源)
+    try:
+        c.execute("ALTER TABLE pick_tracking ADD COLUMN category TEXT")
+    except Exception:
+        pass  # 列已存在则忽略
 
     c.execute("INSERT OR REPLACE INTO tracking_schema_version (version) VALUES (?)",
               (SCHEMA_VERSION,))
@@ -108,15 +113,17 @@ class PickTracker:
         _init_tracking_schema(self.db)
 
     def track_picks(self, df: pd.DataFrame, session_type: str,
-                    pick_date: str = None) -> int:
+                    pick_date: str = None, category: str = None) -> int:
         """
         批量记录选股命中。
-        
+
         Args:
             df: 含 code, name 列的 DataFrame
             session_type: 'pre_market' 或 'post_market'
             pick_date: 命中日期，默认今天
-        
+            category: 来源类目(②A_质量榜/②B_短线榜/ETF组合/③C_观察名单),
+                      用于下游胜率统计精确区分、排除弱分观察名
+
         Returns:
             本次新记录的命中数
         """
@@ -134,7 +141,7 @@ class PickTracker:
             code = str(code).zfill(6)
             name = _clean_name(name, code)
             try:
-                if self._track_one(code, name, session_type, pick_date):
+                if self._track_one(code, name, session_type, pick_date, category):
                     new_count += 1
             except Exception as e:
                 logger.debug(f"追踪记录失败 {code}: {e}")
@@ -144,7 +151,7 @@ class PickTracker:
         return new_count
 
     def _track_one(self, code: str, name: str, session_type: str,
-                   pick_date: str) -> bool:
+                   pick_date: str, category: str = None) -> bool:
         """记录单只股票的一次命中。返回是否新增。"""
         c = self.db.conn
 
@@ -224,10 +231,10 @@ class PickTracker:
         c.execute("""
             INSERT INTO pick_tracking
             (code, name, session_type, pick_date, cycle_id,
-             cycle_start, cycle_end, cycle_hits, cumulative, is_cycle_start)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+             cycle_start, cycle_end, cycle_hits, cumulative, is_cycle_start, category)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (code, name, session_type, pick_date, cycle_id,
-              cycle_start, cycle_end, cycle_hits, cumulative, is_cycle_start))
+              cycle_start, cycle_end, cycle_hits, cumulative, is_cycle_start, category))
 
         return True
 
@@ -344,9 +351,9 @@ def get_tracker() -> PickTracker:
 
 
 def track_picks(df: pd.DataFrame, session_type: str,
-                pick_date: str = None) -> int:
+                pick_date: str = None, category: str = None) -> int:
     """便捷函数: 记录选股命中。"""
-    return get_tracker().track_picks(df, session_type, pick_date)
+    return get_tracker().track_picks(df, session_type, pick_date, category)
 
 
 def get_tracking_summary(session_type: str = None) -> pd.DataFrame:

@@ -39,9 +39,15 @@ def load_picks_from_brief(brief_path: Path) -> list[dict]:
     content = brief_path.read_text(encoding="utf-8")
     picks = []
 
-    # 从表格中提取（质量榜 + 短线榜 + 观察名单）
-    in_table = False
+    # 从表格中提取（仅质量榜 + 短线榜 + ETF组合; 跳过③C观察名单, 避免弱分观察名摊薄胜率分母）
+    skip_section = False
     for line in content.split("\n"):
+        # 二级标题切换章节: 含"观察名单"的章节整体跳过
+        if line.startswith("## "):
+            skip_section = ("观察名单" in line)
+            continue
+        if skip_section:
+            continue
         if line.startswith("|") and "---" not in line:
             cells = [c.strip() for c in line.split("|")]
             if len(cells) >= 3:
