@@ -66,6 +66,7 @@ VALUE_FACTOR = False          # lvrev 内核是否接入价值因子(bp/sp): Fal
 REVERSAL_WINDOW = int(os.getenv("REVERSAL_WINDOW", "20"))
 REVERSAL_Q = float(os.getenv("REVERSAL_Q", "0.30"))
 BEAR_DD = float(os.getenv("BEAR_DD", "0.10"))  # 方向2: 0.10 已采纳(回撤不变, 收益+4.2pt, 夏普0.31); 旧0.12=+26.1%
+MIN_PICK_SCORE = float(os.getenv("MIN_PICK_SCORE", "0.75"))  # 选股绝对质量门槛: composite_score<此值不买(宁缺毋滥, 当天无达标票则空仓, 不硬凑差票)
 EY_WEIGHT = float(os.getenv("EY_WEIGHT", "0.0"))
 
 # === 用户方向4: 周期性波段验证开关(默认关, 不破护栏) ===
@@ -572,6 +573,7 @@ class LocalBacktest:
 
             df = self.filter_stocks(df)
             df = self.score_stocks(df)
+            df = df[df["composite_score"] >= MIN_PICK_SCORE]  # 宁缺毋滥: 与资金模拟同口径(没选中票就不计入推荐)
             picks = self.pick_by_sector(df, MAX_PER_SECTOR)
             picks_risk = self.apply_risk_controls(picks)
 
@@ -770,9 +772,11 @@ class LocalBacktest:
                     cash += pos["shares"] * cur_price * (1 - cr)  # 卖出
                     net_ret = (cur_price * (1 - cr)) / (pos["buy_price"] * (1 + cr)) - 1
                     sell_log.append({
-                        "code": code, "buy_p": pos["buy_price"], "sell_p": cur_price,
+                        "code": code, "name": pos.get("name", code),
+                        "buy_p": pos["buy_price"], "sell_p": cur_price,
                         "held": held_days, "ret": round(ret_pct, 2),
-                        "net_ret": round(net_ret * 100, 2), "reason": reason
+                        "net_ret": round(net_ret * 100, 2), "reason": reason,
+                        "entry_date": pos.get("entry_date", "")
                     })
                     to_sell.append(code)
 
@@ -802,8 +806,9 @@ class LocalBacktest:
             df = self.filter_stocks(df)
             df = self.score_stocks(df)
 
-            # Top N, 排除已有持仓
-            top = df[~df["code"].isin(set(positions.keys()))].head(MAX_PICKS_PER_DAY * 3)
+            # 宁缺毋滥: 先全局过滤 composite_score >= MIN_PICK_SCORE (没达标的票不进候选池); 当天达标为0则空仓, 不硬凑差票
+            top = df[df["composite_score"] >= MIN_PICK_SCORE]
+            top = top[~top["code"].isin(set(positions.keys()))].head(MAX_PICKS_PER_DAY * 3)
             if len(top) == 0:
                 continue
 
@@ -890,7 +895,8 @@ class LocalBacktest:
                     "code": code, "buy_price": price, "shares": shares,
                     "target": round(target_price, 2), "stop": round(stop_price, 2),
                     "hold_days": hold_days, "entry_idx": di, "score": round(s, 2),
-                    "peak": price,
+                    "peak": price, "name": row.get("name", code),
+                    "entry_date": date_str,
                 }
                 buy_count += 1
                 if buy_count >= MAX_PICKS_PER_DAY:
@@ -906,9 +912,11 @@ class LocalBacktest:
             gross = sp / pos["buy_price"] - 1
             net_ret = (sp * (1 - cr)) / (pos["buy_price"] * (1 + cr)) - 1
             sell_log.append({
-                "code": code, "buy_p": pos["buy_price"], "sell_p": sp,
+                "code": code, "name": pos.get("name", code),
+                "buy_p": pos["buy_price"], "sell_p": sp,
                 "held": last_idx - pos["entry_idx"], "ret": round(gross * 100, 2),
-                "net_ret": round(net_ret * 100, 2), "reason": "期末清仓"
+                "net_ret": round(net_ret * 100, 2), "reason": "期末清仓",
+                "entry_date": pos.get("entry_date", "")
             })
         total = cash
         portfolio.append((last_date, round(total, 2)))
@@ -961,12 +969,17 @@ class LocalBacktest:
             y = d[:4]; yearly.setdefault(y, []).append(v)
         year_returns = {y: round((vals[-1]/vals[0]-1)*100,1) for y,vals in yearly.items() if vals[0]>0}
 
+        # 最佳/最差交易 (按净收益排序, 供报告输出)
+        best_trade = max(sell_log, key=lambda x: x["net_ret"]) if sell_log else None
+        worst_trade = min(sell_log, key=lambda x: x["net_ret"]) if sell_log else None
+
         return {
             "initial": cap, "final": round(values[-1],2),
             "return_pct": round((values[-1]/cap-1)*100,2),
             "cagr_pct": round(cagr*100,2), "max_drawdown_pct": round(max_dd*100,2),
             "sharpe": round(sharpe,2), "years": round(years,1),
             "year_returns": year_returns, "portfolio": portfolio,
+            "best_trade": best_trade, "worst_trade": worst_trade,
             "sell_stats": {"reasons": reasons, "avg_held_days": round(avg_held,1),
                            "avg_return": round(avg_ret,2), "total_trades": len(sell_log),
                            "win_rate": round(win_rate, 1),
@@ -1119,6 +1132,8 @@ new Chart(document.getElementById('ddChart'),{{
         tag += "_lvrev"
     if MIN_HOLD > 0:
         tag += f"_mh{MIN_HOLD}"
+    if MIN_PICK_SCORE > 0:
+        tag += f"_mps{MIN_PICK_SCORE:.2f}"
     if PULLBACK_GUARD:
         tag += "_pg"
     html_path = Path("briefs") / f"回测报告_{tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
@@ -1145,7 +1160,7 @@ def main():
     logger.info("=" * 60)
 
     # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核 / 价值因子) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -1161,6 +1176,8 @@ def main():
                     help="lvrev 内核开启价值因子(bp/sp): 默认关(回测净拖累-10.3pt, 见 STRATEGY §8.6), 此开关显式接入低波+便宜双重过滤")
     ap.add_argument("--skip-tn", action="store_true",
                     help="跳过 T+N 选股验证(run)，仅跑资金模拟，省时")
+    ap.add_argument("--min-pick-score", type=float, default=MIN_PICK_SCORE,
+                    help="选股绝对质量门槛 composite_score>=此值才买(宁缺毋滥, 默认0.55); 调高更严/空仓更多, 调低更松")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
@@ -1168,6 +1185,7 @@ def main():
     ALPHA_MODE = args.alpha_mode
     MARKET_GATE = not args.no_market_gate
     VALUE_FACTOR = args.value_factor
+    MIN_PICK_SCORE = args.min_pick_score
     if ALPHA_MODE == "lowvol_rev":
         logger.info("选股内核: 低波+反转+质量 (真 alpha 路线) — 近20日超跌/低波门槛/f_rs·f_trend降为闸门")
         if VALUE_FACTOR:
@@ -1218,6 +1236,16 @@ def main():
             print(f"  平均持有: {sell_stats['avg_held_days']}天 | 平均收益: {sell_stats['avg_return']:+.2f}%")
             for reason, cnt in sell_stats.get("reasons", {}).items():
                 print(f"  {reason}: {cnt}笔")
+
+        # 最佳/最差交易
+        btr = pf.get("best_trade")
+        wtr = pf.get("worst_trade")
+        if btr:
+            print(f"\n最佳交易: {btr.get('name','')}({btr['code']}) {btr.get('entry_date','')}买@{btr['buy_p']} "
+                  f"→ {btr['sell_p']} ({btr['net_ret']:+.2f}%, 持有{btr['held']}天, {btr['reason']})")
+        if wtr:
+            print(f"最差交易: {wtr.get('name','')}({wtr['code']}) {wtr.get('entry_date','')}买@{wtr['buy_p']} "
+                  f"→ {wtr['sell_p']} ({wtr['net_ret']:+.2f}%, 持有{wtr['held']}天, {wtr['reason']})")
 
         # 保存资产曲线
         portfolio = pf.get("portfolio", [])
