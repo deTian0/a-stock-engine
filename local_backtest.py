@@ -66,7 +66,7 @@ VALUE_FACTOR = False          # lvrev 内核是否接入价值因子(bp/sp): Fal
 REVERSAL_WINDOW = int(os.getenv("REVERSAL_WINDOW", "20"))
 REVERSAL_Q = float(os.getenv("REVERSAL_Q", "0.30"))
 BEAR_DD = float(os.getenv("BEAR_DD", "0.10"))  # 方向2: 0.10 已采纳(回撤不变, 收益+4.2pt, 夏普0.31); 旧0.12=+26.1%
-MIN_PICK_SCORE = float(os.getenv("MIN_PICK_SCORE", "0.75"))  # 选股绝对质量门槛: composite_score<此值不买(宁缺毋滥, 当天无达标票则空仓, 不硬凑差票)
+MIN_PICK_SCORE = float(os.getenv("MIN_PICK_SCORE", "0.80"))  # 选股绝对质量门槛: composite_score<此值不买(宁缺毋滥, 当天无达标票则空仓, 不硬凑差票)
 EY_WEIGHT = float(os.getenv("EY_WEIGHT", "0.0"))
 
 # === 用户方向4: 周期性波段验证开关(默认关, 不破护栏) ===
