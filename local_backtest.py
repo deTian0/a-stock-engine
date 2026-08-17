@@ -68,6 +68,7 @@ REVERSAL_Q = float(os.getenv("REVERSAL_Q", "0.30"))
 BEAR_DD = float(os.getenv("BEAR_DD", "0.10"))  # 方向2: 0.10 已采纳(回撤不变, 收益+4.2pt, 夏普0.31); 旧0.12=+26.1%
 MIN_PICK_SCORE = float(os.getenv("MIN_PICK_SCORE", "0.80"))  # 选股绝对质量门槛: composite_score<此值不买(宁缺毋滥, 当天无达标票则空仓, 不硬凑差票)
 EY_WEIGHT = float(os.getenv("EY_WEIGHT", "0.0"))
+IDLE_CASH_RATE = float(os.getenv("IDLE_CASH_RATE", "0.0"))  # 闲置现金 carry: 闲资停泊货币ETF/国债ETF 年化(0=不计息, 与当前基线一致; 0.02≈银华日利/华宝添益)
 
 # === 用户方向4: 周期性波段验证开关(默认关, 不破护栏) ===
 # TAKE_PROFIT: 机械止盈幅度(%), 0=关(用动态目标5-12%); >0=硬顶"不贪吃"(绕过MIN_HOLD, 涨到即卖)
@@ -710,6 +711,9 @@ class LocalBacktest:
         logger.info(f"规则: 目标+{TARGET_BASE}~8%, 止损-{STOP_LOSS}%, 成本{TRADE_COST*100:.1f}%")
 
         for di, date_str in enumerate(all_dates):
+            # 闲置现金 carry: 闲资停泊货币ETF/国债ETF, 每日对现金余额计提(不影响选股内核)
+            if IDLE_CASH_RATE > 0:
+                cash *= (1.0 + IDLE_CASH_RATE / 252.0)
             if (di + 1) % 200 == 0:
                 logger.info(f"  进度: {di+1}/{len(all_dates)} | 持仓{len(positions)} | 现金{cash:,.0f}")
 
@@ -934,7 +938,7 @@ class LocalBacktest:
             if dd > max_dd: max_dd = dd
 
         ret_arr = np.array(returns_daily) if returns_daily else np.array([0])
-        rf_daily = 0.02/252
+        rf_daily = IDLE_CASH_RATE / 252
         excess = ret_arr - rf_daily
         sharpe = float(np.mean(excess)/np.std(excess)*np.sqrt(252)) if np.std(excess)>0 else 0
 
@@ -987,6 +991,7 @@ class LocalBacktest:
                            "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio != float("inf") else None,
                            "net_return_dist": dist},
             "market_gate": self._market_gate_stats(),
+            "idle_cash_rate": IDLE_CASH_RATE,
         }
 
     def _market_gate_stats(self) -> dict:
@@ -1083,6 +1088,7 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
   <div class=\"card\"><div class=\"label\">夏普比率</div><div class=\"value blue\">{pf['sharpe']}</div></div>
   <div class=\"card\"><div class=\"label\">买卖胜率(净)</div><div class=\"value {'red' if win_rate<50 else 'green'}\">{win_rate:.1f}%</div></div>
   <div class=\"card\"><div class=\"label\">L0市场闸门</div><div class=\"value blue\">{('熊市'+str(mg.get('bear_days',0))+'天') if mg.get('enabled') else '关闭'}</div></div>
+  <div class="card"><div class="label">闲资停泊</div><div class="value blue">{pf.get('idle_cash_rate',0)*100:.1f}%/年</div></div>
 </div>
 
 <div class=\"chart-container\"><h3>资产曲线</h3><canvas id=\"equityChart\"></canvas></div>
@@ -1134,6 +1140,8 @@ new Chart(document.getElementById('ddChart'),{{
         tag += f"_mh{MIN_HOLD}"
     if MIN_PICK_SCORE > 0:
         tag += f"_mps{MIN_PICK_SCORE:.2f}"
+    if IDLE_CASH_RATE > 0:
+        tag += f"_idle{IDLE_CASH_RATE:.2f}"
     if PULLBACK_GUARD:
         tag += "_pg"
     html_path = Path("briefs") / f"回测报告_{tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
@@ -1160,7 +1168,7 @@ def main():
     logger.info("=" * 60)
 
     # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核 / 价值因子) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE, IDLE_CASH_RATE
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -1178,6 +1186,8 @@ def main():
                     help="跳过 T+N 选股验证(run)，仅跑资金模拟，省时")
     ap.add_argument("--min-pick-score", type=float, default=MIN_PICK_SCORE,
                     help="选股绝对质量门槛 composite_score>=此值才买(宁缺毋滥, 默认0.55); 调高更严/空仓更多, 调低更松")
+    ap.add_argument("--idle-cash-rate", type=float, default=IDLE_CASH_RATE,
+                    help="闲置现金年化 carry(闲资停泊货币ETF/国债ETF), 0=不计息(与当前基线一致)")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
@@ -1186,6 +1196,7 @@ def main():
     MARKET_GATE = not args.no_market_gate
     VALUE_FACTOR = args.value_factor
     MIN_PICK_SCORE = args.min_pick_score
+    IDLE_CASH_RATE = args.idle_cash_rate
     if ALPHA_MODE == "lowvol_rev":
         logger.info("选股内核: 低波+反转+质量 (真 alpha 路线) — 近20日超跌/低波门槛/f_rs·f_trend降为闸门")
         if VALUE_FACTOR:
@@ -1220,6 +1231,7 @@ def main():
         print(f"年化收益: {pf['cagr_pct']:+.2f}%")
         print(f"最大回撤: {pf['max_drawdown_pct']:.1f}%")
         print(f"夏普比率: {pf['sharpe']}")
+        print(f"闲资停泊: {pf.get('idle_cash_rate',0)*100:.1f}%/年 (闲置现金 carry)")
 
         if pf.get("year_returns"):
             print(f"\n逐年收益:")
