@@ -481,6 +481,54 @@ def save_brief(content: str, config: dict) -> Path:
     return ts_path
 
 
+def _premarket_window_ok(config: dict) -> tuple[bool, str]:
+    """盘前护栏：校验当前是否仍在合法盘前时段。
+
+    A股 9:30 连续竞价开盘；盘前简报应在开盘前用'前收盘价'生成。
+    若任务延迟到开盘后(默认09:30, 北京时)才跑，数据源会返回盘中实时价，
+    此时仍冠以'盘前'名号并给买点，等于在下跌途中诱导买入——必须拦截。
+    返回 (是否放行, 说明文本)。
+    """
+    guard = config.get("brief_guard") or {}
+    cutoff_str = str(guard.get("premarket_cutoff", "09:30"))
+    try:
+        h, m = map(int, cutoff_str.split(":"))
+        cutoff_min = h * 60 + m
+    except Exception:
+        cutoff_min = 9 * 60 + 30
+    now = datetime.now()  # 机器时区须为 Asia/Shanghai（成都/北京）
+    now_min = now.hour * 60 + now.minute
+    if now_min < cutoff_min:
+        return True, f"当前 {now.hour:02d}:{now.minute:02d} 处于盘前窗口(截止 {cutoff_str})"
+    return False, f"当前 {now.hour:02d}:{now.minute:02d} 已越过盘前截止 {cutoff_str}"
+
+
+def _write_guard_blocked_note(config: dict, detail: str) -> Path:
+    """护栏拦截时落一个可见说明文件，避免'无简报=静默'被误读为'8:30正常'。"""
+    out_cfg = config.get("output", {})
+    brief_dir = Path(out_cfg.get("brief_dir", "history"))
+    today = datetime.now().strftime("%Y-%m-%d")
+    save_dir = brief_dir / today
+    save_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%H%M")
+    note = (
+        f"# 盘前护栏拦截 ({today} {ts})\n\n"
+        f"**未生成盘前选股简报。**\n\n"
+        f"原因：{detail}。\n\n"
+        f"盘前任务应在开盘前(默认截止 09:30)用前收盘价生成；此时已超过时点，"
+        f"数据源将返回盘中实时价，若仍以'盘前'名义给出买点，会在下跌途中诱导买入。\n\n"
+        f"## 处理建议\n"
+        f"1. 检查机器 8:30 是否因休眠/关机未触发本任务（排程本身正确）。\n"
+        f"2. 若确需盘中参考，请改用盘中/盘后流程：\n"
+        f"   - `python -m src.daily_brief --session post_market`（盘后）\n"
+        f"   - `python -m src.afternoon_review`（15:30 复盘）\n"
+        f"3. 本文件仅为拦截记录，不含任何买卖建议。\n"
+    )
+    path = save_dir / f"盘前护栏拦截_{ts}.md"
+    path.write_text(note, encoding="utf-8")
+    return path
+
+
 def main():
     """主入口：运行引擎 → 生成简报 → 保存文件。"""
     parser = argparse.ArgumentParser(description="盘前/盘后选股简报生成器")
@@ -507,6 +555,18 @@ def main():
         logger.info("=" * 60)
         logger.info(f"{session_label}选股简报生成器启动")
         logger.info("=" * 60)
+
+        # 盘前护栏：开盘后(默认09:30)禁止用盘中实时价生成'盘前'简报
+        if args.session == "pre_market":
+            ok, detail = _premarket_window_ok(config)
+            if not ok:
+                note_path = _write_guard_blocked_note(config, detail)
+                msg = (f"[盘前护栏拦截] {detail}。已拒绝以盘中实时价生成'盘前'简报；"
+                       f"拦截说明已写入 {note_path}")
+                logger.error(msg)
+                print("BLOCKED: " + msg)
+                sys.exit(2)
+            logger.info(detail)
 
         engine = MultiFactorEngine(config_dict=config)
         results = engine.run(session_type=args.session)

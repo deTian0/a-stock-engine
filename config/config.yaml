@@ -123,6 +123,13 @@ output:
     short_term: 0.20
     etf: 0.30
 
+# --- 盘前护栏 ---
+# 盘前简报应在开盘前(默认09:30, 北京时)用'前收盘价'生成。若任务延迟到开盘后
+# 才跑, 数据源返回盘中实时价, 此时仍以'盘前'名义给买点=下跌途中诱导买入。
+# 越过 premarket_cutoff 则拦截生成(退出码2)并落拦截说明, 禁用盘中价生成盘前简报。
+brief_guard:
+  premarket_cutoff: "09:30"        # 盘前简报最迟生成时点(北京时, HH:MM)
+
 # --- 数据源 ---
 data_source:
   provider: "westock-data"        # 数据源: westock-data CLI
