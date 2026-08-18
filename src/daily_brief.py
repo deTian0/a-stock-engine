@@ -55,6 +55,14 @@ def generate_brief(results: dict, config: dict) -> str:
             return code
         return n
 
+    def _etf_settlement(code: str) -> str:
+        """A股 ETF 结算方式：货币(511)/债券(511)/黄金(518)/跨境(513) 等为 T+0，
+        其余宽基/行业/主题等境内股票型ETF 均为 T+1。此前简报一刀切标 T+0 属错误。"""
+        c = str(code).zfill(6)
+        if c.startswith(("511", "518", "513")):
+            return "T+0"
+        return "T+1"
+
     def _fmt_pct(val, default="-"):
         """安全格式化百分比。"""
         if val is None or not pd.notna(val):
@@ -314,18 +322,19 @@ def generate_brief(results: dict, config: dict) -> str:
     # ============================================================
     # 四、ETF 组合
     # ============================================================
-    lines.append(f"\n## 四、ETF 组合（{len(etf_picks)} 只，T+0/低磨损 {etf_cost*100:.2f}%）\n")
+    lines.append(f"\n## 四、ETF 组合（{len(etf_picks)} 只，A股股票型ETF为**T+1**结算，仅货币/债券/黄金/跨境ETF为T+0）\n")
     if len(etf_picks) > 0:
-        lines.append("| 代码 | 名称 | 类型 | 动量20日 | 成交额(亿) | 建议 |")
-        lines.append("|------|------|------|---------|-----------|------|")
+        lines.append("| 代码 | 名称 | 类型 | 结算 | 动量20日 | 成交额(亿) | 建议 |")
+        lines.append("|------|------|------|------|---------|-----------|------|")
         for _, row in etf_picks.iterrows():
             code = row.get("code", "")
             name = _fmt_name(row, code)
             etype = row.get("etf_type", "-")
+            settle = _etf_settlement(code)
             mom20 = _fmt_pct(row.get("momentum_20d"))
             amt = f"{row.get('amount', 0)/1e8:.1f}" if row.get("amount") else "-"
             advice = "定投" if row.get("score", 0) > 70 else "关注"
-            lines.append(f"| {code} | {name} | {etype} | {mom20} | {amt} | {advice} |")
+            lines.append(f"| {code} | {name} | {etype} | {settle} | {mom20} | {amt} | {advice} |")
     else:
         lines.append("_ETF 数据源暂不可用_\n")
 

@@ -60,6 +60,19 @@ def _to_ws_code(code: str) -> str:
         return f"sz{code}"
 
 
+def _to_index_ws_code(code: str) -> str:
+    """指数代码 → westock sh/sz 前缀格式。
+
+    必须与个股区分：上证指数代码 000001 与平安银行(000001.SZ) 撞码，
+    若走 _to_ws_code 会被转成 sz000001 返回平安银行个股行情，污染 L0 闸门。
+    规则：上证系列(000xxx) → sh；深证/创业板系列(399xxx) → sz。
+    """
+    code = str(code).zfill(6)
+    if code.startswith("000"):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
 def _parse_pipe_table(output: str) -> list[dict]:
     """解析 westock CLI 的 pipe-delimited 表格输出。"""
     lines = output.strip().split("\n")
@@ -411,7 +424,7 @@ class WestockCLI:
             return df
 
         try:
-            ws_code = _to_ws_code(code)
+            ws_code = _to_index_ws_code(code)
             output = run_westock(
                 ["kline", ws_code, "--period", "day", "--limit", str(days)],
                 timeout=self._timeout, max_retries=1

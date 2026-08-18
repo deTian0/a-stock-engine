@@ -5,7 +5,7 @@ afternoon_review.py — 每日盘后复盘（15:30 执行）
   1. 今日最强板块 Top 5 及涨幅
   2. 每板块最强 3-5 只个股
   3. 上涨动因分析（资金流入、量比、技术形态）
-  4. 早盘推荐 T+0 表现验证
+  4. 早盘推荐当日表现验证（个股 T+1，仅展示当日涨跌，非已实现收益）
   5. 策略优化建议
 
 输出:
@@ -191,7 +191,7 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
     # ============================================================
     # 3. 早盘推荐验证
     # ============================================================
-    lines.append("\n## 三、早盘推荐 T+0 验证\n")
+    lines.append("\n## 三、早盘推荐当日表现\n\n> ⚠️ 个股为 **T+1** 结算，当日买入不可当日卖出；下表仅展示「当日涨跌」，并非已实现收益。ETF 视类型（货币/债券/黄金/跨境为 T+0，其余 T+1）。\n")
     try:
         db = get_db()
         latest = db.get_latest_run()
@@ -209,7 +209,7 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
             for cat, cat_picks in by_cat.items():
                 lines.append(f"\n### {cat}\n")
                 if len(cat_picks) > 0:
-                    lines.append("| 代码 | 名称 | 选股评分 | T+0表现 | 建议 |")
+                    lines.append("| 代码 | 名称 | 选股评分 | 当日表现 | 建议 |")
                     lines.append("|------|------|----------|---------|------|")
                     # 尝试获取今日涨跌幅
                     cat_rows = []
@@ -538,7 +538,7 @@ def _cards_html(data: dict) -> str:
     cards = [
         ("最强板块", lead_sector, "info"),
         ("上榜板块", f"{len(top)} 个", "ok"),
-        ("T+0 验证", f"{t0_count} 只", "warn" if t0_count else "info"),
+        ("当日表现", f"{t0_count} 只", "warn" if t0_count else "info"),
         ("累计命中", f"{hit.get('total_hits', 0)} 次", "ok"),
     ]
     html = '<div class="summary">'
@@ -607,7 +607,7 @@ def _t0_html(data: dict) -> str:
         if not rows:
             html += '<p style="color:#999">-</p>'
             continue
-        html += '<table><tr><th>代码</th><th>名称</th><th>选股评分</th><th>T+0表现</th><th>建议</th></tr>'
+        html += '<table><tr><th>代码</th><th>名称</th><th>选股评分</th><th>当日表现</th><th>建议</th></tr>'
         for r in rows:
             t0p = r.get("t0", "-")
             t0cls = "up" if (isinstance(t0p, str) and t0p.startswith("+")) else ("down" if (isinstance(t0p, str) and t0p.startswith("-")) else "")
@@ -701,7 +701,7 @@ def generate_review_html(data: dict) -> str:
 </div>
 
 <div class="section">
-  <h2>✅ 三、早盘推荐 T+0 验证</h2>
+  <h2>✅ 三、早盘推荐当日表现</h2>
   {_t0_html(data)}
 </div>
 
