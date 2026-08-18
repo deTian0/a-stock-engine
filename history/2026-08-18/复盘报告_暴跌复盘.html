@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>早盘选股暴跌复盘 — 2026-08-18</title>
+<style>
+  :root{ --bg:#fafafa; --card:#fff; --ink:#1f2328; --sub:#57606a; --line:#e3e6ea;
+         --red:#d1242f; --green:#1a7f37; --amber:#bf8700; --blue:#0969da; --code:#f3f4f6; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 20px 60px;}
+  h1{font-size:24px;margin:0 0 4px}
+  .meta{color:var(--sub);font-size:13px;margin-bottom:20px}
+  .tldr{background:#fff7e6;border:1px solid #ffe1a8;border-left:4px solid var(--amber);
+        border-radius:10px;padding:16px 18px;margin:18px 0}
+  .tldr b{color:var(--amber)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0;
+        box-shadow:0 1px 2px rgba(0,0,0,.03)}
+  .card h2{font-size:18px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .tag{font-size:12px;padding:2px 9px;border-radius:20px;font-weight:600}
+  .t-bug{background:#ffecec;color:var(--red)}
+  .t-strat{background:#eef6ff;color:var(--blue)}
+  .t-proc{background:#fff3e0;color:var(--amber)}
+  .t-fixed{background:#e9f7ef;color:var(--green)}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f6f8fa;font-weight:600}
+  code{background:var(--code);padding:1px 6px;border-radius:5px;font-size:13px}
+  .kv{display:flex;gap:10px;flex-wrap:wrap}
+  .pill{background:#f3f4f6;border-radius:8px;padding:6px 10px;font-size:13px}
+  .pill b{color:var(--blue)}
+  .red{color:var(--red);font-weight:600}
+  .green{color:var(--green);font-weight:600}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:4px 0}
+  .fixlist li{margin:6px 0}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+  .footer{color:var(--sub);font-size:12px;margin-top:24px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>早盘选股暴跌复盘 — 2026-08-18</h1>
+  <div class="meta">生成时间 2026-08-18 11:04 · 引擎仓库 D:\workspace\github\a-stock-engine · 分支 exp/lowvol_reversal</div>
+
+  <div class="tldr">
+    <b>结论先行：</b>今天的亏损不是"选股模型选错票"单一原因，而是
+    <b>三个工程/流程故障</b>叠加 <b>策略本身的固有波动</b>共同造成的：
+    (1) 盘前任务 <b>10:44 才跑</b>（非 8:30），用的是盘中实时价冒充"盘前"；
+    (2) <b>上证指数被数据接口识别成平安银行</b>（000001 撞码），L0 市场闸门第一指数数据被污染；
+    (3) 简报与盘后把 <b>ETF/个股的 T+0、T+1 结算方式标错</b>，误导了可交易性判断；
+    (4) lvrev 是<b>反转/低波策略</b>，选出的票本就是近期下跌股（8 只短线票 20 日动量全部 -6%~-12%），在下跌市里天然跌幅大、胜率≈随机。
+    其中 (1)(2)(3) 已落地修复，(4) 是策略属性需靠仓位/止损控制，不是 bug。
+  </div>
+
+  <div class="card">
+    <h2><span class="tag t-bug">数据 Bug</span> 根因一：上证指数被当成平安银行（000001 撞码）</h2>
+    <p>指数代码 <code>000001</code> 既是<b>上证指数</b>也是<b>平安银行(000001.SZ)</b>的股票代码。引擎里
+       <code class="mono">_to_ws_code("000001")</code> 因代码以 "0" 开头，被转成 <code>sz000001</code>，
+       数据接口返回的是<b>平安银行个股行情</b>而非上证指数。</p>
+    <table>
+      <tr><th>证据</th><th>正确值（应≈3700）</th><th>实际缓存值</th></tr>
+      <tr><td><code>data_cache/index_kline_000001_70.json</code> 最新一条</td>
+          <td>上证指数 ~3700</td><td class="red">2026-08-18 · 收盘 11.1（=平安银行股价）</td></tr>
+      <tr><td>对照 399001 / 399006（sz 前缀正确）</td>
+          <td>—</td><td class="green">14577.62 / 3699.81（正常）</td></tr>
+    </table>
+    <p><b>影响：</b>L0 闸门"3/3 指数站上 MA60 → 多头、仓位上限 80%"中，第一个指数整个是垃圾数据。
+       即便今天仍误判为多头，这个信号<b>不可信</b>；一旦上证真实走弱，闸门会失真地维持高仓位建议。</p>
+    <p><b>已修复：</b>新增 <code class="mono">_to_index_ws_code()</code>（000xxx→<code>sh</code>、399xxx→<code>sz</code>），
+       仅用于 <code>get_index_kline</code>；并删除已污染的 <code>index_kline_000001_70.json</code> 缓存强制重取。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag t-proc">流程故障</span> 根因二：盘前任务 10:44 才运行（冒充"盘前"）</h2>
+    <p>自动化"早盘选股 — 每日8:30"确实排程在 8:30（工作日），但今天简报生成时间是
+       <b>2026-08-18 10:44:57</b>，距开盘 9:30 已过去 1 小时 14 分。</p>
+    <p><b>两种可能：</b>① 机器在 8:30 处于休眠/未唤醒，任务被推迟到 10:42 才触发；② 8:30 那次失败，事后手动补齐。
+       无论哪种，结果是一样的——<b>"盘前选股"用的是盘中实时价</b>（如山西汾酒 118.94，已低于 8-14 收盘 123.52），
+       等于在当日下跌途中给出买点，用户若在 10:44 附近跟单即买在半山腰。</p>
+    <p><b>影响：</b>盘前分析本应基于前一交易日收盘，给出"隔夜计划"；盘中运行则把当日波动当成信号，
+       且直接进入一个可能正在下跌的盘面，放大亏损。</p>
+    <p><b>待办（需你确认）：</b>检查 8:30 任务是否真的在 8:30 触发过（机器是否休眠/WorkBuddy 是否常驻）。
+       必要时改为开机即跑 + 收盘前不依赖盘中价，或显式标注"盘中补跑，价格非前收"。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag t-bug">标注错误</span> 根因三：T+0 / T+1 结算方式标错</h2>
+    <p>你点出的"t+0 t+1 都搞错了"体现在两处，已修复：</p>
+    <table>
+      <tr><th>位置</th><th>原错误</th><th>实际规则</th><th>修复</th></tr>
+      <tr>
+        <td>盘前简报「四、ETF 组合」标题</td>
+        <td class="red">硬编码写"T+0/低磨损"</td>
+        <td>A股<b>股票型ETF（宽基/行业/主题）一律 T+1</b>；仅货币(511)/债券(511)/黄金(518)/跨境(513) ETF 为 T+0</td>
+        <td class="green">改为按代码前缀逐只判定，表格增设"结算"列</td>
+      </tr>
+      <tr>
+        <td>盘后「三、早盘推荐 T+0 验证」</td>
+        <td class="red">把早盘<b>个股</b>推荐当 T+0 日内可了结</td>
+        <td>A股<b>个股是 T+1</b>，当日买入不可当日卖出，"当日涨跌"≠已实现收益</td>
+        <td class="green">改名为"早盘推荐当日表现"，加 T+1 提示</td>
+      </tr>
+    </table>
+    <p>今天列出的 8 只 ETF（光伏/中证500/5G/中证1000×2/创业板/半导体/云计算）经代码核验
+       <b>全部为 T+1</b>，此前统一标 T+0 属完全错误，会让人误以为能当日进出。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag t-strat">策略属性</span> 根因四：lvrev 反转策略天生高波动（非 bug）</h2>
+    <p>这是最需要讲清楚的——即便前面三个故障都修好，今天这批票在下跌市里也<b>容易跌得狠</b>，因为策略逻辑就是如此：</p>
+    <ul>
+      <li>lvrev 内核 = 低波(0.45) + 反转(0.35) + 质量(0.12) + 成长(0.08)，专门挑<b>近期走弱、低波动</b>的票做反转。</li>
+      <li>今天 8 只短线票 20 日动量<b>全部为负</b>：中国神华 -7.9%、分众 -8.1%、佰仁 -6.7%、中海油 -11.6%、仁和 -5.9%、白药 -9.5%、宁波港 -7.9%、石头 -11.7%。它们是"下落的刀"，不是"强势股"。</li>
+      <li>回测已证明：方向胜率 T+N ≈ 48%（≈随机），收益靠<b>赔率(1.79)+止损+L0 择时</b>堆出来，没有方向 alpha。下跌市里这类票继续下探是常态。</li>
+    </ul>
+    <p><b>结论：</b>这不是"选股模型失灵"，而是<b>反转策略的固有风险</b>。控制手段只有三条——
+       ① 严格 L0 闸门（空头/震荡降仓）；② 单票止损（ATR 止损已配置）；③ 不重仓、不追跌。
+       今天若 L0 闸门因数据污染而虚高（80%），等于在错误信号下放大了暴露。</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag t-fixed">已落地</span> 本次修复清单（代码已改，待提交）</h2>
+    <ul class="fixlist">
+      <li>✅ <code>src/westock_cli.py</code>：新增 <code>_to_index_ws_code()</code>，<code>get_index_kline</code> 改用它，根治 000001 撞码。</li>
+      <li>✅ 删除污染缓存 <code>data_cache/index_kline_000001_70.json</code>，下次运行自动重取正确上证指数。</li>
+      <li>✅ <code>src/daily_brief.py</code>：ETF 区按代码前缀判定 T+0/T+1，标题与表格更正（原硬编码"T+0"）。</li>
+      <li>✅ <code>src/afternoon_review.py</code>：盘后"T+0 验证"更名为"当日表现"，加个股 T+1 提示，HTML/MD 同步。</li>
+      <li>⏳ 三个文件 <code>py_compile</code> 已通过，但<b>尚未 git 提交</b>。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag t-proc">待办</span> 后续动作（需你拍板）</h2>
+    <ul>
+      <li><b>排查 8:30 任务为何 10:44 才跑</b>：确认机器休眠策略 / WorkBuddy 是否常驻。建议加"若盘前未跑则开盘前禁止用盘中价生成盘前简报"的护栏。</li>
+      <li><b>验证 L0 闸门修复效果</b>：下次运行后检查日志里"上证指数: 收盘≈3700"，确认不再显示 11.1。</li>
+      <li><b>策略层面</b>：若不接受反转策略在下跌市的回撤，可考虑在 L0=空头/震荡时直接空仓（当前已实现），或降低 lvrev 反转权重、提高质量权重。</li>
+      <li><b>本次未提交</b>：修复代码已落盘，等你确认后我一并 commit + push + tag（沿用 v4.x 惯例）。</li>
+    </ul>
+  </div>
+
+  <div class="footer">
+    复盘依据：history/2026-08-18/盘前选股简报.md、data_cache/engine.log、data_cache/index_kline_*.json、
+    picks.db(pick_tracking)、src/{westock_cli,daily_brief,afternoon_review,multifactor}.py、config/config.yaml、自动化列表。
+    注：本环境无法拉取 10:44 之后实时行情，"下跌很厉害"以你的实盘观察为准，结构归因见根因四。
+  </div>
+</div>
+</body>
+</html>
