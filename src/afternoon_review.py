@@ -36,6 +36,37 @@ from pick_tracker import get_tracking_report, get_tracking_summary, track_picks
 
 logger = logging.getLogger(__name__)
 
+_QUOTE_COLS = ["change_pct", "close", "amount", "volume", "volume_ratio", "amplitude"]
+
+
+def _inject_westock_quotes(df: pd.DataFrame) -> pd.DataFrame:
+    """注入 westock-data 实时行情（tushare/新浪回退列表可能缺 change_pct/close/amount）。
+
+    幂等：仅在 change_pct/close/amount 全缺时才触发，注入一次后再次调用为 no-op。
+    """
+    if df is None or len(df) == 0 or "code" not in df.columns:
+        return df
+    need = (
+        "change_pct" not in df.columns or df["change_pct"].isna().all()
+        or "close" not in df.columns or df["close"].isna().all()
+        or "amount" not in df.columns or df["amount"].isna().all()
+    )
+    if not need:
+        return df
+    from westock_helpers import batch_quotes
+    quote_map = batch_quotes(df["code"].astype(str).str.zfill(6).tolist())
+    if not quote_map:
+        return df
+    qdf = pd.DataFrame.from_dict(quote_map, orient="index").reset_index().rename(columns={"index": "code"})
+    qdf["code"] = qdf["code"].astype(str).str.zfill(6)
+    qmap = qdf.set_index("code")
+    codes_z = df["code"].astype(str).str.zfill(6)
+    for col in _QUOTE_COLS:
+        if col in qdf.columns and (col not in df.columns or df[col].isna().all()):
+            df[col] = codes_z.map(qmap[col])
+    logger.info(f"已注入westock实时行情: {len(quote_map)} 只 (涨跌幅覆盖 {df['change_pct'].notna().sum()} 只)")
+    return df
+
 
 def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
                     preloaded_prices: dict = None, config: dict = None) -> tuple[str, dict]:
@@ -90,24 +121,7 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
         codes = stock_list["code"].astype(str).str.zfill(6)
         stock_list = stock_list[codes.str.startswith(("0","1","3","5","6"))]
         # 注入 westock-data 实时行情（tushare/新浪回退列表可能缺 change_pct/close/amount）
-        _quote_cols = ["change_pct", "close", "amount", "volume", "volume_ratio", "amplitude"]
-        _need_quotes = (
-            "change_pct" not in stock_list.columns or stock_list["change_pct"].isna().all()
-            or "close" not in stock_list.columns or stock_list["close"].isna().all()
-            or "amount" not in stock_list.columns or stock_list["amount"].isna().all()
-        )
-        if _need_quotes:
-            from westock_helpers import batch_quotes
-            quote_map = batch_quotes(stock_list["code"].astype(str).str.zfill(6).tolist())
-            if quote_map:
-                qdf = pd.DataFrame.from_dict(quote_map, orient="index").reset_index().rename(columns={"index": "code"})
-                qdf["code"] = qdf["code"].astype(str).str.zfill(6)
-                qmap = qdf.set_index("code")
-                codes_z = stock_list["code"].astype(str).str.zfill(6)
-                for col in _quote_cols:
-                    if col in qdf.columns and (col not in stock_list.columns or stock_list[col].isna().all()):
-                        stock_list[col] = codes_z.map(qmap[col])
-                logger.info(f"已注入westock实时行情: {len(quote_map)} 只 (涨跌幅覆盖 {stock_list['change_pct'].notna().sum()} 只)")
+        stock_list = _inject_westock_quotes(stock_list)
         stock_list["sector"] = stock_list["code"].astype(str).str.zfill(6).map(sector_mapping).fillna("综合")
         agg_spec = {
             "avg_chg": ("change_pct", "mean"),
@@ -157,8 +171,8 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
 
         if len(sector_df) > 0 and "change_pct" in sector_df.columns:
             top = sector_df.nlargest(5, "change_pct")
-            lines.append("| 代码 | 名称 | 当日股价 | 一手价格 | 涨幅 | 量比 | 成交额(亿) | 动因 |")
-            lines.append("|------|------|---------|---------|------|------|-----------|------|")
+            lines.append("| 代码 | 名称 | 当日股价 | 一手价格 | 止损 | 涨幅 | 量比 | 成交额(亿) | 动因 |")
+            lines.append("|------|------|---------|---------|------|------|------|-----------|------|")
             sec_list = []
             for _, row in top.iterrows():
                 code = str(row.get("code", ""))
@@ -169,16 +183,19 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
                 close = row.get("close", 0)
                 close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
                 lot_str = f"{close * 100:.0f}" if pd.notna(close) and close > 0 else "-"
+                stop = _compute_stop_loss(preloaded_prices.get(code), close)
+                stop_str = f"{stop:.2f}" if stop is not None else "-"
                 chg = f"{row.get('change_pct', 0):.1f}%" if pd.notna(row.get("change_pct")) else "-"
                 vol_r = f"{row.get('volume_ratio', 0):.2f}" if pd.notna(row.get("volume_ratio")) else "-"
                 amt = f"{row.get('amount', 0)/1e8:.1f}" if pd.notna(row.get("amount")) else "-"
                 causes = _analyze_cause(row, preloaded_prices, code)
-                lines.append(f"| {code} | {name} | {close_str} | {lot_str} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
+                lines.append(f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {chg} | {vol_r} | {amt} | {', '.join(causes[:2])} |")
                 sec_list.append({
                     "code": code,
                     "name": name if name != code else code,
                     "close": float(close) if pd.notna(close) and close > 0 else None,
                     "lot": int(close * 100) if pd.notna(close) and close > 0 else None,
+                    "stop_loss": stop,
                     "chg": float(row.get("change_pct", 0)) if pd.notna(row.get("change_pct")) else None,
                     "vol_ratio": float(row.get("volume_ratio", 0)) if pd.notna(row.get("volume_ratio")) else None,
                     "amount_yi": float(row.get("amount", 0))/1e8 if pd.notna(row.get("amount")) else None,
@@ -417,6 +434,29 @@ def _analyze_cause(row, prices: dict, code: str) -> list[str]:
     return causes
 
 
+def _compute_stop_loss(closes: list[float], close_today: float) -> float | None:
+    """ATR 代理止损价：用近 N 日收盘价收益率估算日均波动，止损 = 收盘 × (1 - 2×日均波动)。
+
+    采用收益率（比例）而非绝对价差，规避预取 K 线（可能后复权/滞后）与实时价混用的尺度错配。
+    """
+    if not closes or len(closes) < 5 or close_today is None or close_today <= 0:
+        return None
+    try:
+        rets = []
+        for i in range(len(closes) - 1):
+            if closes[i + 1] and closes[i + 1] > 0:
+                rets.append(abs(closes[i] / closes[i + 1] - 1))
+        if not rets:
+            return None
+        vol = sum(rets) / len(rets)  # 日均绝对收益率
+        if vol <= 0:
+            return None
+        stop = close_today * (1 - 2 * vol)
+        return round(max(stop, 0.01), 2)
+    except Exception:
+        return None
+
+
 # ============================================================
 # HTML 渲染（复用 html_report.py 的 Qbot 风格范式）
 # ============================================================
@@ -577,7 +617,7 @@ def _sector_stocks_html(data: dict) -> str:
         if not stocks:
             html += '<p style="color:#999">个股数据不足</p>'
             continue
-        html += '<table><tr><th>代码</th><th>名称</th><th>股价</th><th>一手价</th><th>涨幅</th><th>量比</th><th>成交额(亿)</th><th>动因</th></tr>'
+        html += '<table><tr><th>代码</th><th>名称</th><th>股价</th><th>一手价</th><th>止损</th><th>涨幅</th><th>量比</th><th>成交额(亿)</th><th>动因</th></tr>'
         for s in stocks:
             chg = s.get("chg")
             chg_cls = "up" if (chg or 0) >= 0 else "down"
@@ -585,6 +625,7 @@ def _sector_stocks_html(data: dict) -> str:
                      f'<td>{_esc(s.get("name","-"))}</td>'
                      f'<td>{s.get("close","-") if s.get("close") is not None else "-"}</td>'
                      f'<td>{s.get("lot","-") if s.get("lot") is not None else "-"}</td>'
+                     f'<td>{s.get("stop_loss","-") if s.get("stop_loss") is not None else "-"}</td>'
                      f'<td class="{chg_cls}">{_fmt_chg(chg)}</td>'
                      f'<td>{s.get("vol_ratio","-") if s.get("vol_ratio") is not None else "-"}</td>'
                      f'<td>{s.get("amount_yi","-") if s.get("amount_yi") is not None else "-"}</td>'
@@ -771,9 +812,12 @@ def main():
         # 归一化 code 为 6 位字符串（缓存 round-trip 可能丢失前导零）
         if len(all_stocks) > 0 and "code" in all_stocks.columns:
             all_stocks["code"] = all_stocks["code"].astype(str).str.zfill(6)
+        # 先注入 westock 实时行情，确保 change_pct 可用后再预取 K 线（否则 nlargest 拿到乱序代码）
+        all_stocks = _inject_westock_quotes(all_stocks)
         codes_for_prices = []
         if len(all_stocks) > 0 and "code" in all_stocks.columns:
-            codes_for_prices = all_stocks.nlargest(50, "change_pct")["code"].tolist() if "change_pct" in all_stocks.columns else all_stocks["code"].head(300).tolist()
+            # 预取范围扩大到 top 300，避免涨停股并列(+20%)时把板块领涨股挤出预取列表
+            codes_for_prices = all_stocks.nlargest(300, "change_pct")["code"].tolist() if "change_pct" in all_stocks.columns else all_stocks["code"].head(300).tolist()
         preloaded_prices = _batch_preload_prices(codes_for_prices, config, price_loader)
 
         content, review_data = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
