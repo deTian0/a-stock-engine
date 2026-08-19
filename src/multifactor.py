@@ -150,6 +150,8 @@ class MultiFactorEngine:
                     }
                     continue
 
+                # 防御性排序: 确保 date 升序(旧→新), 不论数据源(westock/tushare/akshare)返回顺序
+                df = df.sort_values("date", kind="stable").reset_index(drop=True)
                 close = float(df["close"].iloc[-1])
                 ma_s = float(df["close"].tail(ma_short).mean())
                 ma_l = float(df["close"].tail(ma_long).mean())

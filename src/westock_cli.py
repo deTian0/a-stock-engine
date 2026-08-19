@@ -384,6 +384,9 @@ class WestockCLI:
             if "last" in df.columns and "close" not in df.columns:
                 df = df.rename(columns={"last": "close"})
             df = _coerce_numeric(df)
+            # 统一排序方向: westock 原始返回降序(最新在前), 此处强制升序(旧→新),
+            # 与 tushare/akshare 兜底一致, 确保 iloc[-1]/tail() 取到最新一根 K 线
+            df = df.sort_values("date", kind="stable").reset_index(drop=True)
             return df
 
         try:
@@ -399,6 +402,8 @@ class WestockCLI:
                 df = pd.DataFrame(rows)
                 df = df.rename(columns={"last": "close"})
                 df = _coerce_numeric(df)
+                # 统一排序方向: 强制升序(旧→新), 与 tushare/akshare 兜底一致
+                df = df.sort_values("date", kind="stable").reset_index(drop=True)
                 self._write_cache(cache_key, df.to_dict(orient="records"))
                 return df
         except Exception as e:
@@ -421,6 +426,9 @@ class WestockCLI:
             if "last" in df.columns and "close" not in df.columns:
                 df = df.rename(columns={"last": "close"})
             df = _coerce_numeric(df)
+            # 统一排序方向: westock 原始返回降序(最新在前), 此处强制升序(旧→新),
+            # 与 tushare/akshare 兜底一致, 确保 iloc[-1]/tail() 取到最新一根 K 线
+            df = df.sort_values("date", kind="stable").reset_index(drop=True)
             return df
 
         try:
@@ -434,6 +442,8 @@ class WestockCLI:
                 df = pd.DataFrame(rows)
                 df = df.rename(columns={"last": "close"})  # westock → 系统标准列名
                 df = _coerce_numeric(df)
+                # 统一排序方向: 强制升序(旧→新), 与 tushare/akshare 兜底一致
+                df = df.sort_values("date", kind="stable").reset_index(drop=True)
                 self._write_cache(cache_key, df.to_dict(orient="records"))
                 return df
         except Exception as e:
