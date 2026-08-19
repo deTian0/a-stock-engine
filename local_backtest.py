@@ -44,8 +44,13 @@ MARKET_MA200 = 200           # L0 市场闸门: 宽基代理指数 MA200(熊市�
 MARKET_GATE = True            # L0 市场闸门总开关 (--no-market-gate 关闭做 A/B)
 INITIAL_CAPITAL = 50000
 MAX_PICKS_PER_DAY = 8        # M4: 每日选股数 20→8 (降低分散度/换手)
-TRADE_COST = 0.0013          # 0.13% 交易成本 (股票: 万0.854+印花税)
-ETF_COST = 0.00017           # 0.017% ETF交易成本 (免印花税)
+# === 交易成本 (真实口径, 2026-08-19 修正) ===
+# 佣金: 华宝证券 万0.854 免5, 买卖双边 | 印花税: 万5, 仅卖出侧收取(2023-08-28 起减半)
+COMMISSION_RATE = 0.0000854   # 万0.854 佣金
+STAMP_SELL_RATE = 0.0005      # 万5 印花税, 仅卖出侧
+TRADE_COST = COMMISSION_RATE  # 股票买入成本率(仅佣金); 卖出侧在 _trade_cost 内追加印花税
+ETF_COST = COMMISSION_RATE    # ETF 佣金(免5), 免印花税
+MAX_SINGLE_WEIGHT = 0.10      # 单票目标权重上限(与 config max_single_stock 对齐)
 STOP_LOSS = 8.0              # 止损 (%) — 2026-08-12 固化最优: 硬止损笔数48.7%→33.2%, 总收益-39.65%→-13.66%
 TARGET_BASE = 5.0            # 基础目标收益 (%)  M5: 3→5
 TRAIL_STOP_PCT = 6.0         # M2: 移动止损, 自持仓高点回撤比例 (%)
@@ -85,6 +90,8 @@ class LocalBacktest:
         self.raw_conn = sqlite3.connect(self.db.db_path)
         self._dates_cache: Optional[list[str]] = None
         self._survivors: Optional[set] = None  # 存活股票集合
+        self._st_codes: Optional[set] = None    # ST/退市 黑名单(6位代码)
+        self._pct_cache: dict = {}              # 每日涨跌幅缓存(涨跌停判定)
         self._mom_cache: Optional[dict] = None   # M1a: 预计算动量矩阵 {列名: DataFrame(date×code)}
         self._rev_cache: dict = {}                # 动态反转收益矩阵缓存(按窗口)
         self._pit: Optional[PITFundamentals] = None  # M6: PIT 时点基本面索引
@@ -264,20 +271,83 @@ class LocalBacktest:
                 scale[d] = 0.6 if (not pd.isna(cp_v)) and cp_v < 0.20 else 1.0
         return scale
 
+    # === 代码归一 / 分类辅助 (2026-08-19) ===
+    @staticmethod
+    def _norm_code(raw: str) -> str:
+        """'000001.SZ' / '000001' -> '000001' (6位)。"""
+        return raw.replace(".", "")[:6]
+
+    @staticmethod
+    def _is_fund(code6: str) -> bool:
+        """场内基金/ETF/债券(1xxxxx / 5xxxxx 前缀)非股票, 排除出选股宇宙。"""
+        return code6.startswith(("1", "5"))
+
+    @staticmethod
+    def _is_etf(code: str) -> bool:
+        """ETF/基金: 免印花税。覆盖常见场内基金前缀。"""
+        c = LocalBacktest._norm_code(code)
+        return c.startswith(("15", "51", "56", "58", "510", "511", "512", "513",
+                             "515", "516", "517", "518", "519", "520", "560",
+                             "561", "562", "563", "564", "565", "566", "567",
+                             "568", "588", "501", "502", "505", "506", "507", "508"))
+
+    @staticmethod
+    def _limit_pct(code6: str, is_st: bool = False) -> float:
+        """涨跌停幅度: ST ±5% / 创业板(30)/科创板(68) ±20% / 主板 ±10%。"""
+        if is_st:
+            return 0.05
+        if code6.startswith(("30", "68")):
+            return 0.20
+        return 0.10
+
+    def _build_st_codes(self) -> set:
+        """ST / *ST / 退市 黑名单: 从 fundamentals 名称识别, 返回6位代码集合。"""
+        if self._st_codes is not None:
+            return self._st_codes
+        c = self.raw_conn
+        rows = c.execute(
+            "SELECT code FROM fundamentals "
+            "WHERE name LIKE '%ST%' OR name LIKE '%退%' OR name LIKE '%*%'"
+        ).fetchall()
+        self._st_codes = {self._norm_code(r[0]) for r in rows}
+        logger.info(f"ST/退市黑名单: {len(self._st_codes)} 只")
+        return self._st_codes
+
+    def _day_pct(self, code: str, date_str: str):
+        """某股票某日涨跌幅(%)，用于涨跌停判定；按日期缓存。无数据返回 None。"""
+        cache = self._pct_cache
+        bucket = cache.get(date_str)
+        if bucket is None:
+            rows = self.raw_conn.execute(
+                "SELECT code, pct_chg FROM daily_price WHERE date=?", (date_str,)
+            ).fetchall()
+            bucket = {self._norm_code(r[0]): r[1] for r in rows}
+            cache[date_str] = bucket
+        return bucket.get(self._norm_code(code))
+
     def _compute_survivors(self, min_days: int = 252) -> set:
-        """幸存者偏差校正：排除上市<1年的新股和即将退市的。"""
+        """幸存者偏差校正：排除上市<1年的新股、北交所、基金(1/5前缀)、ST/退市。"""
         if self._survivors is not None:
             return self._survivors
         c = self.raw_conn
-        # 排除北交所(.BJ 后缀: 83/87/88/43/92 前缀均属北京系, daily_price 统一带 .BJ 后缀)
+        # 排除北交所(.BJ 后缀)
         rows = c.execute(
             "SELECT code, COUNT(*) as cnt FROM daily_price "
             "WHERE code NOT LIKE '%.BJ' GROUP BY code HAVING cnt >= ?",
             (min_days,)
         ).fetchall()
-        self._survivors = {r[0] for r in rows}
-        logger.info(f"幸存者过滤: {len(self._survivors)} 只 (>={min_days}天)")
-        return self._survivors  # 缓存最近读取的日期数据
+        st = self._build_st_codes()
+        surv = set()
+        for r in rows:
+            n = self._norm_code(r[0])
+            if n in st:
+                continue  # ST/退市
+            if self._is_fund(n):
+                continue  # 基金/ETF/债券 非股票
+            surv.add(r[0])
+        self._survivors = surv
+        logger.info(f"幸存者过滤: {len(surv)} 只 (>={min_days}天, 已剔除ST/退市/基金/北交所)")
+        return self._survivors
 
     def get_available_dates(self) -> list[str]:
         """获取所有可用交易日（后复权CSV + parquet 合并）。"""
@@ -666,11 +736,15 @@ class LocalBacktest:
 
     @staticmethod
     def _trade_cost(code: str, is_buy: bool = True) -> float:
-        """计算交易成本率。ETF 免印花税。"""
-        if code.startswith(("15", "51", "56", "58", "510", "512", "513", "515", "516",
-                            "517", "518", "560", "561", "562", "563", "588")):
-            return ETF_COST  # ETF 只有佣金，无印花税
-        return TRADE_COST
+        """交易成本率(真实口径)。
+        股票: 买入仅佣金(万0.854); 卖出佣金+印花税(万5)。
+        ETF/基金: 仅佣金(免5), 免印花税。
+        """
+        if LocalBacktest._is_etf(code):
+            return COMMISSION_RATE
+        if is_buy:
+            return COMMISSION_RATE
+        return COMMISSION_RATE + STAMP_SELL_RATE  # 卖出侧追加印花税
 
     def run_portfolio(self) -> dict:
         """资金模拟：每只有目标/止损，动态持仓周期。初始资金读配置 portfolio.initial_capital。"""
@@ -708,7 +782,7 @@ class LocalBacktest:
         sell_log = []   # 记录每笔卖出: (code, buy_p, sell_p, held, ret%, reason)
 
         logger.info(f"资金模拟: 初始{cap:,.0f}元, 日选{MAX_PICKS_PER_DAY}只")
-        logger.info(f"规则: 目标+{TARGET_BASE}~8%, 止损-{STOP_LOSS}%, 成本{TRADE_COST*100:.1f}%")
+        logger.info(f"规则: 目标+{TARGET_BASE}~8%, 止损-{STOP_LOSS}%, 成本(买{COMMISSION_RATE*100:.4f}%/卖{(COMMISSION_RATE+STAMP_SELL_RATE)*100:.4f}%, ETF{COMMISSION_RATE*100:.4f}%)")
 
         for di, date_str in enumerate(all_dates):
             # 闲置现金 carry: 闲资停泊货币ETF/国债ETF, 每日对现金余额计提(不影响选股内核)
@@ -726,7 +800,13 @@ class LocalBacktest:
             for code, pos in list(positions.items()):
                 cur_price = self.get_price_on_date(code, date_str)
                 if cur_price is None:
-                    cur_price = pos["buy_price"]
+                    continue  # 停牌/无数据: 当日不顺延假成交, 次日重试
+                # 跌停: 卖单封板无法成交, 顺延至次日(现实化)
+                c6 = self._norm_code(code)
+                lim = self._limit_pct(c6, c6 in (self._st_codes or self._build_st_codes()))
+                pchg = self._day_pct(code, date_str)
+                if pchg is not None and pchg <= -lim * 100 + 0.01:
+                    continue
                 # 更新持仓高点
                 if cur_price > pos.get("peak", pos["buy_price"]):
                     pos["peak"] = cur_price
@@ -741,7 +821,7 @@ class LocalBacktest:
                 below_ma20 = (ma20 is not None and cur_price < ma20)
 
                 reason = None
-                cr = self._trade_cost(code)
+                cr = self._trade_cost(code, is_buy=False)
                 # 0. L0 市场熊市闸门(绕过MIN_HOLD): 广基指数自1年高点回撤>12% 强制清仓, 压系统性回撤
                 if bear:
                     reason = "市场熊市清仓(回撤>12%)"
@@ -799,8 +879,8 @@ class LocalBacktest:
                 continue
             if bear:           # L0: 熊市不清仓外不新建仓
                 continue
-            if cash < 5000:  # 资金太少不买
-                continue
+            # 注: 移除旧的 `cash < 5000` 绝对闸 — 它会让小本金更早停买, 是本金敏感性的根源之一。
+            # 权重制仓位(见下)已保证小本金按相同权重建仓, 仅受百股取整这一真实约束。
             if len(positions) >= MAX_POSITIONS:  # M4: 持仓已满不买
                 continue
 
@@ -872,13 +952,29 @@ class LocalBacktest:
                     if PULLBACK_GUARD and not bool(row.get("pullback_ok", True)):
                         continue
 
-                alloc = cash * mscale / max(MAX_PICKS_PER_DAY - buy_count, 1)
-                shares = int(alloc / price / 100) * 100
-                if shares < 100:
+                # 涨停: 买单价封板无法成交, 跳过(现实化)
+                c6b = self._norm_code(code)
+                lim_b = self._limit_pct(c6b, c6b in (self._st_codes or self._build_st_codes()))
+                if pd.notna(row.get("pct_chg")) and row["pct_chg"] >= lim_b * 100 - 0.01:
                     continue
 
+                # === 权重制仓位(资本无关, 消除本金敏感性 artifact) ===
+                # 目标权重 = min(1/日选数, 单票上限); 预算 = 当前权益 × 目标权重 × 市场闸门
+                # 当前权益 = 现金 + 持仓市值 → 与本金同比例缩放 → 收益对本金近似无关
+                max_sw = MAX_SINGLE_WEIGHT
+                if getattr(self, "config", None):
+                    max_sw = (self.config or {}).get("portfolio", {}).get("max_single_stock", MAX_SINGLE_WEIGHT)
+                target_w = min(1.0 / MAX_PICKS_PER_DAY, max_sw)
+                equity = cash
+                for p in positions.values():
+                    equity += p["shares"] * (self.get_price_on_date(p["code"], date_str) or p["buy_price"])
+                budget = equity * target_w * mscale
+                # === 资本无关: 份额取分数(回测收益模拟标准假设) ===
+                # 预算=权益×目标权重, 份额=预算/价 → 任意本金下持有相同权重的相同股票, 收益严格资本无关。
+                # 百股取整(1手)是真实账户约束: 小本金难持有高价股, 属账户规模真实限制, 非策略 artifact, 另行披露。
+                shares = budget / price
                 cost = shares * price * (1 + self._trade_cost(code, is_buy=True))  # 买入
-                if cost > cash * 0.5:
+                if cost > cash:
                     continue
 
                 # 动态持仓天数 (M5): 5-15天
@@ -911,7 +1007,7 @@ class LocalBacktest:
         last_idx = len(all_dates) - 1
         for code, pos in list(positions.items()):
             sp = self.get_price_on_date(code, last_date) or pos["buy_price"]
-            cr = self._trade_cost(code)
+            cr = self._trade_cost(code, is_buy=False)
             cash += pos["shares"] * sp * (1 - cr)  # 清仓
             gross = sp / pos["buy_price"] - 1
             net_ret = (sp * (1 - cr)) / (pos["buy_price"] * (1 + cr)) - 1
@@ -1076,7 +1172,7 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
 <h1>A股多因子选股系统 — 回测报告</h1>
 <p style=\"text-align:center;color:#64748b;margin-bottom:24px\">
   区间: {dates[0]} ~ {dates[-1]} | {pf['years']}年 | 
-  佣金: 万0.854免5 (股票{config.get('trade',{}).get('stock_cost',0.0013)*100:.2f}% / ETF{config.get('trade',{}).get('etf_cost',0.00017)*100:.3f}%)
+  佣金: 万0.854免5 | 股票买入0.0085% / 卖出0.0585%(含印花税万5) | ETF 0.0085%(免印花税)
 </p>
 
 <div class=\"cards\">
@@ -1188,6 +1284,8 @@ def main():
                     help="选股绝对质量门槛 composite_score>=此值才买(宁缺毋滥, 默认0.55); 调高更严/空仓更多, 调低更松")
     ap.add_argument("--idle-cash-rate", type=float, default=IDLE_CASH_RATE,
                     help="闲置现金年化 carry(闲资停泊货币ETF/国债ETF), 0=不计息(与当前基线一致)")
+    ap.add_argument("--capital", type=float, default=None,
+                    help="覆盖初始资金(验证权重制本金无关性): 默认读 config portfolio.initial_capital")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
@@ -1209,6 +1307,11 @@ def main():
         logger.info(f"启用最小持有期 MIN_HOLD = {MIN_HOLD} 天")
     if PULLBACK_GUARD:
         logger.info("启用入场回踩不破守卫 (pullback-guard)")
+
+    # --capital: 覆盖初始资金, 用于验证权重制本金无关性
+    if args.capital is not None:
+        config.setdefault("portfolio", {})["initial_capital"] = args.capital
+        logger.info(f"覆盖初始资金 = ¥{args.capital:,.0f} (--capital)")
 
     bt = LocalBacktest()
     bt.config = config  # 注入配置
