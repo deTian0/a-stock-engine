@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class SectorRotationWatcher:
     """板块轮动监控器。"""
 
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config.yaml"):
         config_path = Path(config_path)
         if not config_path.is_absolute():
             config_path = Path(__file__).parent.parent / config_path

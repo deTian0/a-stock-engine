@@ -59,7 +59,7 @@ pip install -r requirements.txt
 
 ### 2. 配置
 
-编辑 `config/config.yaml`：
+编辑 `config.yaml`（仓库根统一配置）：
 - `account.holdings`: 填入当前持仓
 - `account.available_cash`: 可用资金
 - `factor_l4.factors`: 调整因子权重

@@ -26,7 +26,7 @@ def check_config():
     print("\n" + "=" * 60)
     print("1. 检查 config.yaml 因子名称")
     print("=" * 60)
-    config_path = Path(__file__).parent / "config" / "config.yaml"
+    config_path = Path(__file__).parent / "config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     
@@ -138,7 +138,7 @@ def check_factor_pipeline():
               f"roe={fund.get('roe')}, market_cap={fund.get('market_cap')}")
         
         # 验证因子名称匹配
-        config_path = Path(__file__).parent / "config" / "config.yaml"
+        config_path = Path(__file__).parent / "config.yaml"
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
         

@@ -14,7 +14,7 @@ def _load():
     global _CONFIG
     if _CONFIG is not None:
         return _CONFIG
-    config_path = Path(__file__).parent.parent / "config" / "config.yaml"
+    config_path = Path(__file__).parent.parent / "config.yaml"
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             full = yaml.safe_load(f)

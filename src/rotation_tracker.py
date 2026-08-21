@@ -59,7 +59,7 @@ class RotationTracker:
 
         # 加载配置
         if config_path is None:
-            config_path = Path(__file__).parent.parent / "config/config.yaml"
+            config_path = Path(__file__).parent.parent / "config.yaml"
         import yaml
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = yaml.safe_load(f)

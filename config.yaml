@@ -1,10 +1,22 @@
-# A股多因子选股系统 — 回测配置
-# 修改参数后直接运行: python local_backtest.py
+# ============================================================
+# A股多因子选股系统 — 统一配置 (single source of truth)
+# ------------------------------------------------------------
+# 2026-08-21 合并: 原根 config.yaml(回测) + 原 config/config.yaml(每日管线)
+# 消除"分裂脑"——所有加载器(回测 + src/ 每日管线)统一读本文件。
+# 加载路径(仓库根 config.yaml):
+#   - 回测:  local_backtest.py / run_value_ab.py / scan_opt.py
+#            (Path(__file__).parent / "config.yaml")
+#   - 管线:  src/*.py
+#            (Path(__file__).parent.parent / "config.yaml")
+# ============================================================
 
+# ============================================================
+# 一、回测配置 (local_backtest.py 等)
+# ============================================================
 portfolio:
   initial_capital: 20000        # 初始资金（元）— 与 account.available_cash 对齐
   max_picks_per_day: 8          # 每日最多持仓 (与代码常量 MAX_PICKS_PER_DAY=8 对齐; 实际以代码常量为准, 此键仅用于日志)
-  min_cash_to_trade: 5000       # 现金低于此数不买入
+  min_cash_to_trade: 5000       # 回测用; 现金低于此数不买入
 
 risk:
   stop_loss: 5.0                # 止损线 (%)
@@ -17,7 +29,7 @@ timing:
   enabled: true                 # 是否启用择时
 
 trade:
-  stock_cost: 0.0013            # 股票交易成本 (万0.854+印花税)
+  stock_cost: 0.0013            # 股票交易成本 (仅兼容/日志; 实际成本见代码 COMMISSION_RATE/STAMP_SELL_RATE)
   etf_cost: 0.00017             # ETF交易成本 (免印花税)
 
 holding:
@@ -28,28 +40,6 @@ holding:
 universe:
   min_list_days: 252            # 最少上市天数（排除新股）
   exclude_st: true              # 排除ST/退市
-
-output:
-  save_csv: true                # 保存资产曲线CSV
-  save_html: true               # 生成可视化HTML报告
-
-# ============================================================
-# 盘前简报 — 篮子仓位分配 (basket allocation)
-# ------------------------------------------------------------
-# 环境仓位上限 position_cap 是「总资金」天花板, 不能直接当作单只票的仓位。
-# 这里把它切分为三个篮子, 各篮子预算 = position_cap × 权重;
-# 篮子内再按评分加权分配到每只票 (allocate_basket)。
-# 这样: 单只票只是总资金的一小块; 同篮子各票仓位%相加 = 该篮子预算;
-#       所有篮子预算相加 (= 权重和) × position_cap ≤ 总资金上限。
-# 例(震荡 cap=50%): 中长线 25% + 短线 15% + ETF 10% = 50%。
-# ============================================================
-brief:
-  sleeve_weights:
-    quality: 0.50        # 中长线质量仓（牛市主力）
-    short_term: 0.30     # 短线反弹仓
-    etf: 0.20            # ETF 定投仓（不计入战术仓位表, 单独 DCA）
-  max_single_position: 0.08   # 单只股票占总资金上限 (8%)
-  method: score_weighted      # score_weighted | equal
 
 # ============================================================
 # 回测引擎 — 因子权重 (可被覆盖, 便于调参)
@@ -74,3 +64,197 @@ backtest:
     f_small_cap: 0.06
     f_low_vol: 0.10
     f_quality: 0.05
+
+# ============================================================
+# 盘前简报 — 篮子仓位分配 (回测侧, allocate_basket 读取)
+# ------------------------------------------------------------
+# 环境仓位上限 position_cap 是「总资金」天花板, 不能直接当作单只票的仓位。
+# 这里把它切分为三个篮子, 各篮子预算 = position_cap × 权重;
+# 篮子内再按评分加权分配到每只票 (allocate_basket)。
+# 例(震荡 cap=50%): 中长线 25% + 短线 15% + ETF 10% = 50%。
+# ------------------------------------------------------------
+# 注: 与下方 output.sleeve_weights(管线侧, etf:0.30) 数值不同是历史差异——
+#     本 brief.sleeve_weights 服务回测篮子模型, output.sleeve_weights 服务每日实盘简报。
+#     若后续需统一篮子权重, 再单独处理。
+# ============================================================
+brief:
+  sleeve_weights:
+    quality: 0.50        # 中长线质量仓（牛市主力）
+    short_term: 0.30     # 短线反弹仓
+    etf: 0.20            # ETF 定投仓（不计入战术仓位表, 单独 DCA）
+  max_single_position: 0.08   # 单只股票占总资金上限 (8%)
+  method: score_weighted      # score_weighted | equal
+
+# ============================================================
+# 二、每日管线配置 (src/*.py: daily_brief / afternoon_review / multifactor ...)
+# ============================================================
+
+# --- 系统配置 ---
+system:
+  encoding: "utf-8"                # westock-data/npx子进程输出的编码（固定UTF-8，无需改）
+  npx_path: "npx.cmd"             # npx 命令路径 (可配绝对路径)
+
+# --- 账户配置 ---
+account:
+  available_cash: 20000          # 可用资金（元）
+  total_assets: 9403.91          # 总资产（华宝证券）
+  max_position_ratio: 0.80       # 最大仓位比例
+  max_single_stock: 0.10         # 单只股票最大占比
+  holdings:                       # 当前持仓（来自华宝证券）
+    # 格式: code: {name, shares, cost_price}
+    # 一手 = 100股，最小买入数 = 1手
+    "159852": {name: "软件ETF嘉实", shares: 1400, cost_price: 0.725}
+    "159869": {name: "游戏ETF华夏", shares: 3700, cost_price: 1.142}
+
+# --- 市场环境判断 (L0) ---
+env_regime:
+  indices:                        # 用于判断市场环境的指数
+    - code: "000001"              # 上证指数
+      name: "上证指数"
+    - code: "399001"              # 深证成指
+      name: "深证成指"
+    - code: "399006"              # 创业板指
+      name: "创业板指"
+  ma_short: 20                    # 短期均线天数
+  ma_long: 60                     # 长期均线天数
+  regime_thresholds:              # 市场环境判断阈值
+    bull_above_ma_ratio: 0.67     # 2/3以上指数站上长期均线 → 多头
+    bear_below_ma_ratio: 0.67     # 2/3以上指数跌破长期均线 → 空头
+    # 其余为震荡
+  position_caps:                  # 各环境下的仓位上限
+    多头: 0.80
+    震荡: 0.50
+    空头: 0.20
+
+# --- L2 预过滤 ---
+filter_l2:
+  exclude_st: true                # 排除ST/*ST
+  exclude_new: true              # 排除上市不足60天
+  exclude_suspended: true        # 排除停牌
+  min_market_cap: 2000000000      # 最小市值（元，=20亿。数据源返回元）
+  max_pe: 200                     # 最大PE（排除负PE和异常值）
+  min_daily_amount: 0.5          # 最小日均成交额（亿元，代码内 ×1e8 转元）
+
+# --- L4 多因子评分 ---
+factor_l4:
+  # 因子权重说明:
+  #   - pe/pb/market_cap 来自实时行情或本地快照（可靠）
+  #   - roe/gross_margin 需要基本面数据源（本地快照优先，CLI 备选）
+  #   - momentum_20d/60d 从 DB daily_price 批量计算（性能优化）
+  #   - 若某因子数据全为默认值(0)，排名退化为均匀分布，不影响排序
+  factors:
+    # 价值因子 — 列名必须与 _extract_fundamentals 输出一致
+    - name: "pe"
+      weight: 0.12
+      direction: "ascending"      # PE越低越好
+    - name: "pb"
+      weight: 0.08
+      direction: "ascending"      # PB越低越好
+    # 质量因子（需本地快照或 CLI 补充，缺失时自动跳过）
+    - name: "roe"
+      weight: 0.15
+      direction: "descending"     # ROE越高越好
+    - name: "gross_margin"
+      weight: 0.08
+      direction: "descending"
+    - name: "debt_ratio"
+      weight: 0.05
+      direction: "ascending"      # 负债率越低越好
+    # 成长因子
+    - name: "revenue_growth"
+      weight: 0.10
+      direction: "descending"
+    - name: "profit_growth"
+      weight: 0.10
+      direction: "descending"
+    # 动量因子 — 从 local_price_loader 或 DB 批量计算
+    - name: "momentum_20d"
+      weight: 0.12
+      direction: "descending"
+    - name: "momentum_60d"
+      weight: 0.10
+      direction: "descending"
+    # 小市值因子
+    - name: "market_cap"
+      weight: 0.10
+      direction: "ascending"      # 小市值溢价（越低市值加权越高）
+  top_n: 30                       # L4最终选出前N只
+
+  # ===== 方向4: lvrev 真 alpha 内核对齐(与 local_backtest 回测同一套数学) =====
+  # 默认开启: ②A 质量榜评分改用 src/lvrev_scorer.score_lvrev
+  #   = 低波(0.45) + 近20日超跌反转(0.35) + 质量(0.12) + 成长(0.08)
+  #   并附加入场风控闸门标记 entry_ok(MA20>MA60 硬闸门 + 不接飞刀 + 底部超跌 + 长线支撑 + 低波门槛)。
+  # 关闭(use_lvrev_kernel: false) 回退到上方旧动量/价值加权内核(已被证伪的反 alpha, 仅对照)。
+  use_lvrev_kernel: true
+  lvrev:
+    value_factor: false   # 价值因子(bp/sp): 默认关(回测净拖累-10.3pt); 与回测基线一致
+    ey_weight: 0.0        # ey(1/pe_ttm)加性价值权重: 默认0=关(不稀释低波/反转)
+    reversal_q: 0.30      # 底部分位门槛(越低越严格); 与回测 REVERSAL_Q 默认一致
+    apply_entry_gate: false  # 默认仅标记 entry_ok(保证②A有候选); true=硬过滤只留到买点
+
+# --- 输出配置(合并: 回测 save_* + 每日管线 brief_*) ---
+output:
+  # 回测输出
+  save_csv: true                # 保存资产曲线CSV
+  save_html: true               # 生成可视化HTML报告
+  # 每日管线输出
+  brief_dir: "history"             # 简报输出目录 (git 追踪, 数据不丢失)
+  brief_filename: "盘前选股简报.md"
+  date_based_archive: true        # 按日期分目录存档（避免覆盖）
+  quality_top_n: 10               # ②A质量榜数量
+  short_term_top_n: 5             # ②B短线榜数量
+  watchlist_top_n: 23             # ③C观察名单数量
+  min_composite_score: 80         # 入选推荐的最低 composite_score(百分制, 内核×100后); 0=关闭。过滤低分票防拖低胜率。已对齐回测 MIN_PICK_SCORE=0.80(v4.17, 同源 lvrev 内核 [0,1]→每日百分制80); 实证0.80触发宁缺毋滥质变(回测总+38.4%/夏普0.41)
+  # 篮子仓位权重(占「环境上限」的比例, 和=1): 实盘校准(2026-08-14)
+  #   - etf 0.20->0.30: 用户实盘 ETF 表现稳健(白名单+分散+顺势+低磨), 提升占比
+  #   - short_term 0.30->0.20: ②B 原动量买强=反 alpha, 降权压暴露
+  #   - quality 0.50 不变: lvrev 真 alpha 内核, 中长线质量 drift
+  sleeve_weights:
+    quality: 0.50
+    short_term: 0.20
+    etf: 0.30
+
+# --- 盘前护栏 ---
+# 盘前简报应在开盘前(默认09:30, 北京时)用'前收盘价'生成。若任务延迟到开盘后
+# 才跑, 数据源返回盘中实时价, 此时仍以'盘前'名义给买点=下跌途中诱导买入。
+# 越过 premarket_cutoff 则拦截生成(退出码2)并落拦截说明, 禁用盘中价生成盘前简报。
+brief_guard:
+  premarket_cutoff: "09:30"        # 盘前简报最迟生成时点(北京时, HH:MM)
+
+# --- 数据源 ---
+data_source:
+  provider: "westock-data"        # 数据源: westock-data CLI
+  cache_dir: "data_cache"         # 数据缓存目录
+  cache_expiry_hours: 12          # 缓存过期时间（小时）
+  request_timeout: 30             # 请求超时（秒）
+  max_retries: 3                  # 最大重试次数
+
+# --- v5 反弹引擎 ---
+rebound_engine:
+  enabled: false                  # 暂时禁用（需要网络K线，当前离线模式）
+  lookback_days: 10               # 回看天数
+  decline_threshold: -0.08       # 跌幅阈值（-8%）
+  volume_surge_ratio: 1.5         # 量比阈值
+  bounce_confirm_days: 2          # 反弹确认天数
+
+# --- 并发控制（防CPU过载）---
+concurrency:
+  max_workers: 4                   # L4 线程池最大 worker 数（建议 2-4；CPU 退化设备应更低）
+  review_workers: 8                # 盘后复盘 K 线补全 worker 数（IO密集，可设大些）
+  fetch_delay_ms: 50               # 每个 worker 启动间隔（毫秒），避免瞬时 CPU 尖峰
+  subprocess_timeout: 30           # 单个 CLI 调用超时（秒）
+
+# --- 板块轮动追踪 ---
+rotation:
+  max_per_sector_stock: 5           # 每板块最大股票数
+  max_per_sector_etf: 5             # 每板块最大 ETF 数
+  window_days: 14                   # 滑动窗口天数
+  sessions:                         # 盘前/盘后
+    - pre_market                    # 09:00 盘前
+    - post_market                   # 16:00 盘后
+
+# --- 日志 ---
+logging:
+  level: "INFO"                   # DEBUG / INFO / WARNING / ERROR
+  file: "data_cache/engine.log"
+  console: true
