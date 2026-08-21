@@ -58,6 +58,7 @@ MAX_POSITIONS = 15           # M4: 最大持仓数 (降低分散度)
 MAX_HOLD_DAYS = 60            # C1: 动态持有安全上限(极长持有才强制了结, 非正常退出)
 MIN_HOLD = 30                 # 最小持有期(天): 非硬止损卖出需持有>=N天 — v4.8 扫描5/10/15/20/25/30, mh30最优(+49.6%, 回撤-27.8%, 夏普0.31, 盈亏比2.48)
 PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才买(降换手实验)
+LOT_MODE = False               # 百股取整模式: False=分数份额(资本无关, 回测标准假设); True=百股(1手)取整, 收益对本金敏感, 仅用于小账户可执行估计
 # 选股 alpha 内核: "trend"(v4.8 买强/动量, 仅作对照) | "lowvol_rev"(低波+反转+质量, 真 alpha 路线, 已固化默认)
 # 2026-08-12 固化: lvrev 内核改为"近20日超跌"口径, f_rs/f_trend 降为风控闸门; 叠加 L0 市场闸门(宽基MA200+估值分位)
 ALPHA_MODE = "lowvol_rev"
@@ -969,10 +970,16 @@ class LocalBacktest:
                 for p in positions.values():
                     equity += p["shares"] * (self.get_price_on_date(p["code"], date_str) or p["buy_price"])
                 budget = equity * target_w * mscale
-                # === 资本无关: 份额取分数(回测收益模拟标准假设) ===
-                # 预算=权益×目标权重, 份额=预算/价 → 任意本金下持有相同权重的相同股票, 收益严格资本无关。
-                # 百股取整(1手)是真实账户约束: 小本金难持有高价股, 属账户规模真实限制, 非策略 artifact, 另行披露。
-                shares = budget / price
+                # === 份额计算 ===
+                # 默认(分数份额): 份额=预算/价 → 任意本金下持有相同权重的相同股票, 收益严格资本无关(回测标准基准)。
+                # --lot 模式: 百股(1手)取整 → 该价下预算不足1手则跳过, 收益对本金敏感(资本相关),
+                #   仅用于小账户可执行估计(真实账户约束: 小本金难持有高价股, 属账户规模限制, 非策略 artifact)。
+                if LOT_MODE:
+                    shares = int(budget / price / 100) * 100
+                    if shares < 100:
+                        continue  # 百股取整: 该价下预算不足1手 → 跳过(真实约束, 非 artifact)
+                else:
+                    shares = budget / price  # 分数份额: 资本无关(回测标准假设)
                 cost = shares * price * (1 + self._trade_cost(code, is_buy=True))  # 买入
                 if cost > cash:
                     continue
@@ -1286,11 +1293,14 @@ def main():
                     help="闲置现金年化 carry(闲资停泊货币ETF/国债ETF), 0=不计息(与当前基线一致)")
     ap.add_argument("--capital", type=float, default=None,
                     help="覆盖初始资金(验证权重制本金无关性): 默认读 config portfolio.initial_capital")
+    ap.add_argument("--lot", action="store_true",
+                    help="百股(1手)取整模式: 收益对本金敏感(资本相关), 仅用于小账户可执行估计; 默认关=分数份额(资本无关, 回测标准基准)")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
     PULLBACK_GUARD = args.pullback_guard
     ALPHA_MODE = args.alpha_mode
+    LOT_MODE = args.lot
     MARKET_GATE = not args.no_market_gate
     VALUE_FACTOR = args.value_factor
     MIN_PICK_SCORE = args.min_pick_score
@@ -1307,6 +1317,8 @@ def main():
         logger.info(f"启用最小持有期 MIN_HOLD = {MIN_HOLD} 天")
     if PULLBACK_GUARD:
         logger.info("启用入场回踩不破守卫 (pullback-guard)")
+    if LOT_MODE:
+        logger.info("启用百股取整模式 (--lot): 收益对本金敏感(资本相关), 仅作小账户可执行估计")
 
     # --capital: 覆盖初始资金, 用于验证权重制本金无关性
     if args.capital is not None:

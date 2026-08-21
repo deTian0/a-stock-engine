@@ -3,7 +3,7 @@
 
 portfolio:
   initial_capital: 20000        # 初始资金（元）— 与 account.available_cash 对齐
-  max_picks_per_day: 20         # 每日最多持仓
+  max_picks_per_day: 8          # 每日最多持仓 (与代码常量 MAX_PICKS_PER_DAY=8 对齐; 实际以代码常量为准, 此键仅用于日志)
   min_cash_to_trade: 5000       # 现金低于此数不买入
 
 risk:
