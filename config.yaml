@@ -73,15 +73,15 @@ backtest:
 # 篮子内再按评分加权分配到每只票 (allocate_basket)。
 # 例(震荡 cap=50%): 中长线 25% + 短线 15% + ETF 10% = 50%。
 # ------------------------------------------------------------
-# 注: 与下方 output.sleeve_weights(管线侧, etf:0.30) 数值不同是历史差异——
-#     本 brief.sleeve_weights 服务回测篮子模型, output.sleeve_weights 服务每日实盘简报。
-#     若后续需统一篮子权重, 再单独处理。
+# 注: 已于 v4.24 与 output.sleeve_weights 统一(quality:0.50/short_term:0.20/etf:0.30)。
+#     本 brief.sleeve_weights 服务回测篮子模型, output.sleeve_weights 服务每日实盘简报,
+#     两者现采用同一组权重。
 # ============================================================
 brief:
   sleeve_weights:
     quality: 0.50        # 中长线质量仓（牛市主力）
-    short_term: 0.30     # 短线反弹仓
-    etf: 0.20            # ETF 定投仓（不计入战术仓位表, 单独 DCA）
+    short_term: 0.20     # 短线反弹仓（已与 output.sleeve_weights 统一, v4.24）
+    etf: 0.30            # ETF 定投仓（已与 output.sleeve_weights 统一, v4.24）
   max_single_position: 0.08   # 单只股票占总资金上限 (8%)
   method: score_weighted      # score_weighted | equal
 
