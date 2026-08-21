@@ -1,0 +1,13 @@
+[load] daily_price ...
+[load] close matrix (1554, 6946), codes=6946, dates=1554 (74.1s)
+[ic] {'factor': 'low_vol(20d实现波动取负) | fwd20', 'n_dates': 1502, 'mean_IC': np.float64(0.1026), 'std_IC': np.float64(0.1863), 'ICIR': np.float64(0.551), 't_stat': np.float64(21.34), 'pct_IC_positive': np.float64(71.8)}
+[ic] {'factor': 'low_vol(20d实现波动取负) | fwd60', 'n_dates': 1466, 'mean_IC': np.float64(0.1267), 'std_IC': np.float64(0.1516), 'ICIR': np.float64(0.836), 't_stat': np.float64(31.99), 'pct_IC_positive': np.float64(80.8)}
+[ic] {'factor': 'reversal(近20日超跌取负) | fwd20', 'n_dates': 1507, 'mean_IC': np.float64(0.0654), 'std_IC': np.float64(0.1487), 'ICIR': np.float64(0.44), 't_stat': np.float64(17.07), 'pct_IC_positive': np.float64(65.8)}
+[ic] {'factor': 'reversal(近20日超跌取负) | fwd60', 'n_dates': 1468, 'mean_IC': np.float64(0.0616), 'std_IC': np.float64(0.1314), 'ICIR': np.float64(0.469), 't_stat': np.float64(17.96), 'pct_IC_positive': np.float64(67.5)}
+[load] fundamentals_pit ...
+[load] pit matched 311781 rows across 5187 codes
+[ic] quarterly rebalance dates: 20
+[ic] {'factor': 'quality(ROE, PIT) | fwd60(季度)', 'n_dates': 19, 'mean_IC': np.float64(-0.078), 'std_IC': np.float64(0.1156), 'ICIR': np.float64(-0.675), 't_stat': np.float64(-2.94), 'pct_IC_positive': np.float64(31.6)}
+[ic] {'factor': 'growth(利润增速, PIT) | fwd60(季度)', 'n_dates': 19, 'mean_IC': np.float64(-0.0295), 'std_IC': np.float64(0.0795), 'ICIR': np.float64(-0.371), 't_stat': np.float64(-1.62), 'pct_IC_positive': np.float64(47.4)}
+
+[DONE] 98.1s -> empirical/ic_results.csv

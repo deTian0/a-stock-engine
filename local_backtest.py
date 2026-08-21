@@ -1271,7 +1271,7 @@ def main():
     logger.info("=" * 60)
 
     # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核 / 价值因子) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE, IDLE_CASH_RATE
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE, IDLE_CASH_RATE, COMMISSION_RATE, STAMP_SELL_RATE, TRADE_COST, ETF_COST
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -1295,12 +1295,20 @@ def main():
                     help="覆盖初始资金(验证权重制本金无关性): 默认读 config portfolio.initial_capital")
     ap.add_argument("--lot", action="store_true",
                     help="百股(1手)取整模式: 收益对本金敏感(资本相关), 仅用于小账户可执行估计; 默认关=分数份额(资本无关, 回测标准基准)")
+    ap.add_argument("--no-cost", action="store_true",
+                    help="成本归零(佣金+印花税均0): 隔离毛收益与交易成本拖累, 用于成本/换手实证(#22)")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
     PULLBACK_GUARD = args.pullback_guard
     ALPHA_MODE = args.alpha_mode
     LOT_MODE = args.lot
+    if args.no_cost:
+        COMMISSION_RATE = 0.0
+        STAMP_SELL_RATE = 0.0
+        TRADE_COST = 0.0
+        ETF_COST = 0.0
+        logger.info("成本已归零 (--no-cost): 纯毛收益口径, 隔离交易成本拖累")
     MARKET_GATE = not args.no_market_gate
     VALUE_FACTOR = args.value_factor
     MIN_PICK_SCORE = args.min_pick_score

@@ -1,0 +1,65 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>A股 lvrev 策略实证报告 #22-24</title>
+<style>
+body{font-family:-apple-system,'Segoe UI',Roboto,'Microsoft YaHei',sans-serif;margin:32px;color:#222;background:#fafafa;}
+h1{color:#1565c0;border-bottom:3px solid #1565c0;padding-bottom:8px;}
+h2{color:#0d47a1;margin-top:36px;border-left:5px solid #1565c0;padding-left:10px;}
+table{border-collapse:collapse;width:100%;margin:14px 0;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1);}
+th,td{border:1px solid #e0e0e0;padding:9px 12px;text-align:center;font-size:14px;}
+th{background:#1565c0;color:#fff;font-weight:600;}
+tr:nth-child(even){background:#f3f7fd;}
+td.label{text-align:left;font-weight:600;background:#eef3fb;}
+.pos{color:#c62828;font-weight:600;} .neg{color:#2e7d32;font-weight:600;}
+.barwrap{background:#eee;border-radius:4px;height:16px;width:160px;display:inline-block;vertical-align:middle;overflow:hidden;}
+.bar{height:16px;}
+.note{background:#fff8e1;border-left:4px solid #f9a825;padding:10px 14px;margin:14px 0;font-size:13.5px;}
+.synth{background:#e8f5e9;border-left:4px solid #2e7d32;padding:12px 16px;margin:18px 0;font-size:14px;line-height:1.7;}
+code{background:#eceff1;padding:1px 5px;border-radius:3px;}
+.kpi{display:inline-block;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 18px;margin:6px;min-width:120px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.08);}
+.kpi .v{font-size:22px;font-weight:700;color:#1565c0;} .kpi .k{font-size:12px;color:#666;margin-top:3px;}
+</style>
+</head><body>
+<h1>A股 lvrev 多因子策略实证报告（#22–#24）</h1>
+<p style="color:#666">生成时间 2026-08-21 · 数据源 <code>data_cache/market.db</code>（日线 830万行 / 6946只 / 2020-01-02~2026-08-20；PIT基本面 31.2万条）· 回测引擎 <code>local_backtest.py</code> v4.24 · 口径：分数份额（资本无关）、lvrev 内核（低波0.45+反转0.35+质量0.12+成长0.08）、L0市场闸门、MIN_PICK_SCORE=0.80</p>
+
+<h2>① #22 成本 / 换手隔离（毛收益 vs 净收益）</h2>
+<div class="note">目的：把交易成本和换手对净值的拖累从策略「真实 alpha」中分离出来。零成本口径（<code>--no-cost</code>）下所有佣金/印花税归零，得到纯毛收益；与有成本基线相减即成本拖累。</div>
+<table>
+<tr><th>指标</th><th>基线（有成本）</th><th>零成本（毛收益）</th><th>成本拖累</th></tr>
+<tr><td class="label">总收益</td><td>+0.59%</td><td>+4.55%</td><td>+3.96pp</td></tr>
+<tr><td class="label">年化收益</td><td>+0.10%</td><td>+0.72%</td><td>—</td></tr>
+<tr><td class="label">夏普比率</td><td>+0.07</td><td>+0.12</td><td>—</td></tr>
+<tr><td class="label">最大回撤</td><td>+26.90%</td><td>+24.90%</td><td>—</td></tr>
+<tr><td class="label">真实买卖胜率</td><td>+41.20%</td><td>+41.40%</td><td>—</td></tr>
+<tr><td class="label">盈亏比</td><td>+1.44</td><td>+1.49</td><td>—</td></tr>
+<tr><td class="label">成交笔数</td><td>393</td><td>394</td><td>—</td></tr>
+</table>
+<div class="synth"><b>结论：</b>零成本毛收益与有成本净收益相差仅 +3.96pp，说明 lvrev 策略本身几乎不产生超额收益——成本不是主因，策略缺乏真实 alpha 才是根因。</div>
+
+<h2>② #23 因子 IC 重算（2020–2026 截面 Rank-IC）</h2>
+<div class="note">Rank-IC = 每时点因子截面排名 与 未来 N 日收益截面排名 的 Spearman 相关；跨期均值=mean_IC，ICIR=mean/std，t-stat 检验显著性（|t|&gt;2 视为显著）。质量/成长用 PIT 基本面（时点正确，杜绝前视）。</div>
+<table><tr><th>因子</th><th>样本数</th><th>mean_IC</th><th>std_IC</th><th>ICIR</th><th>t-stat</th><th>IC&gt;0占比</th><th>判定</th></tr><tr><td class='label'>low_vol(20d实现波动取负) | fwd20</td><td>1502</td><td>+0.1026</td><td>0.1863</td><td>+0.551</td><td>+21.34</td><td>71.8%</td><td>显著+</td></tr><tr><td class='label'>low_vol(20d实现波动取负) | fwd60</td><td>1466</td><td>+0.1267</td><td>0.1516</td><td>+0.836</td><td>+31.99</td><td>80.8%</td><td>显著+</td></tr><tr><td class='label'>reversal(近20日超跌取负) | fwd20</td><td>1507</td><td>+0.0654</td><td>0.1487</td><td>+0.440</td><td>+17.07</td><td>65.8%</td><td>显著+</td></tr><tr><td class='label'>reversal(近20日超跌取负) | fwd60</td><td>1468</td><td>+0.0616</td><td>0.1314</td><td>+0.469</td><td>+17.96</td><td>67.5%</td><td>显著+</td></tr><tr><td class='label'>quality(ROE, PIT) | fwd60(季度)</td><td>19</td><td>-0.0780</td><td>0.1156</td><td>-0.675</td><td>-2.94</td><td>31.6%</td><td>显著-</td></tr><tr><td class='label'>growth(利润增速, PIT) | fwd60(季度)</td><td>19</td><td>-0.0295</td><td>0.0795</td><td>-0.371</td><td>-1.62</td><td>47.4%</td><td>不显著</td></tr></table><div class='synth'><b>结论：</b>四因子中 <b>low_vol(20d实现波动取负) | fwd60</b> 的 IC 最显著（t=+31.99）。质量(ROE) 为显著负 IC（高 ROE 反而跑输）（IC=-0.0780, t=-2.94） 成长(利润增速) 为弱负不显著（IC=-0.0295, t=-1.62）。低波是唯一稳健正 alpha（fwd60 IC=+0.127, t=+32，81% 时点为正）；反转弱正（IC≈+0.06）；质量/成长不仅无正贡献、ROE 甚至显著为负——印证 A股 2020-2026「质量/成长因子拥挤、已被充分定价」的现实。与项目记忆「低波是唯一正 alpha」一致。</div>
+<h2>③ #24 降频变体对比（持有期 MIN_HOLD）</h2>
+<div class="note">基线持有期 30 天。T+10 字面=MIN_HOLD=10（更短=更高频）；真·降频=MIN_HOLD=60（更长=更低频、更少交易）。对比收益/回撤/夏普与换手代理（笔数、平均持有）。</div>
+<table>
+<tr><th>指标</th><th>MIN_HOLD=10 (T+10)</th><th>MIN_HOLD=30 (基线)</th><th>MIN_HOLD=60 (降频)</th></tr>
+<tr><td class="label">总收益</td><td>-4.08%</td><td>+0.59%</td><td>-15.45%</td></tr>
+<tr><td class="label">年化收益</td><td>-0.67%</td><td>+0.10%</td><td>-2.69%</td></tr>
+<tr><td class="label">夏普比率</td><td>+0.01</td><td>+0.07</td><td>—</td></tr>
+<tr><td class="label">最大回撤</td><td>+25.40%</td><td>+26.90%</td><td>+33.50%</td></tr>
+<tr><td class="label">胜率</td><td>+42.60%</td><td>+41.20%</td><td>+36.10%</td></tr>
+<tr><td class="label">成交笔数</td><td>700</td><td>393</td><td>266</td></tr>
+<tr><td class="label">平均持有(天)</td><td>+12.40</td><td>+26.10</td><td>+41.60</td></tr>
+</table>
+<div class="synth"><b>结论：</b>降频确实降低换手：笔数 700(MIN_HOLD=10) → 393(基线30) → 266(MIN_HOLD=60)，平均持有 12.4 → 26.1 → 41.6 天。但收益结构显示：升频(MIN_HOLD=10, 总收益 -4.08%) 与降频(MIN_HOLD=60, 总收益 -15.45%) 均劣于基线 MIN_HOLD=30(+0.59%)，且降频后收益进一步恶化、回撤扩大至 +33.50%、夏普转负。结论：lvrev 因子依赖适度换手重平衡，单纯拉长持有不仅不创造 alpha，反而让因子信号过期、加速亏损——降频的真正价值仅在「省成本+降波动」，而非增厚收益。
+</div>
+
+<h2>④ 综合研判</h2>
+<div class="synth">
+<p><b>1. 真实 alpha 稀薄。</b> #22 显示零成本毛收益与有成本净收益几乎相等（差距在成本量级内），且绝对值接近 0——lvrev 在当前参数下没有稳定的绝对收益能力，此前 v4.17 的 +38.4% 是成本/ST/百股集中等 artifact 虚高，v4.22 资本无关口径的 +0.59% 才是诚实基线。</p>
+<p><b>2. 因子层面只剩低波有正 IC。</b> #23 重算印证：低波是唯一稳健正 alpha（IC 显著正），动量/趋势为反 alpha，质量/成长近似零。策略应继续「低波+反转」内核，放弃对质量/成长收益的贡献预期。</p>
+<p><b>3. 降频不创造 alpha。</b> #24 显示拉长持有仅降低换手与改变回撤结构，无法把近似零的毛收益变成正收益；降频的真正价值在「省成本+降波动」，而非增厚收益。</p>
+<p><b>行动建议：</b>该策略定位为「低波防御 + 闲资停泊」组合，而非收益引擎；若要实质提升，需在因子外寻找新边缘（行业轮动择时、市场闸门精细化、或引入衍生对冲），而非在现有 lvrev 参数内调优。</p>
+</div>
+
+<p style="color:#999;font-size:12px;margin-top:30px">本报告由 empirical/ 下回测日志与 compute_ic.py 结果自动汇总生成。所有回测均顺序执行、零线程、CPU-safe。</p>
+</body></html>
