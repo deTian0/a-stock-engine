@@ -27,9 +27,11 @@ import pandas as pd
 import numpy as np
 
 
-# 默认评分权重(与 local_backtest 历史 +26.1% 基线一致)
-W_DEFAULT = dict(vol=0.45, rev=0.35, value=0.0, q=0.12, g=0.08)
-W_VALUE = dict(vol=0.38, rev=0.27, value=0.18, q=0.10, g=0.07)
+# 默认评分权重(v4.26: 成长 g 清零 — 营收增速 Rank-IC=-0.030/t=-1.62 弱负且不显著,
+#   属纯噪声/负贡献; 隔离回测 v4.25(+10.14%/夏普0.19) -> v4.26(+28.59%/夏普0.40),
+#   全部指标同向改善。任何权重倾斜(vol/rev 增减)均不如"仅清零成长"的极简改动)
+W_DEFAULT = dict(vol=0.45, rev=0.35, value=0.0, q=0.12, g=0.0)
+W_VALUE = dict(vol=0.38, rev=0.27, value=0.18, q=0.10, g=0.0)
 
 
 def score_lvrev(df: pd.DataFrame, value_factor: bool = False,

@@ -1247,10 +1247,15 @@ new Chart(document.getElementById('ddChart'),{{
         tag += f"_idle{IDLE_CASH_RATE:.2f}"
     if PULLBACK_GUARD:
         tag += "_pg"
+    if WEIGHT_TAG:
+        tag += WEIGHT_TAG
     html_path = Path("briefs") / f"回测报告_{tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html, encoding="utf-8")
     return str(html_path)
+
+
+WEIGHT_TAG = ""  # lvrev 权重覆写后缀(网格搜索), 由 main() 设置
 
 
 def main():
@@ -1271,7 +1276,7 @@ def main():
     logger.info("=" * 60)
 
     # ---- 命令行参数 (A/B 对比: 止损线 / 最小持有期 / 回踩守卫 / 跳过 T+N / alpha 内核 / 价值因子) ----
-    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE, IDLE_CASH_RATE, COMMISSION_RATE, STAMP_SELL_RATE, TRADE_COST, ETF_COST
+    global STOP_LOSS, MIN_HOLD, PULLBACK_GUARD, ALPHA_MODE, MARKET_GATE, VALUE_FACTOR, MIN_PICK_SCORE, IDLE_CASH_RATE, COMMISSION_RATE, STAMP_SELL_RATE, TRADE_COST, ETF_COST, WEIGHT_TAG
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop-loss", type=float, default=STOP_LOSS,
                     help="硬止损线(%%)，覆盖默认 STOP_LOSS，用于 A/B 对比")
@@ -1297,6 +1302,14 @@ def main():
                     help="百股(1手)取整模式: 收益对本金敏感(资本相关), 仅用于小账户可执行估计; 默认关=分数份额(资本无关, 回测标准基准)")
     ap.add_argument("--no-cost", action="store_true",
                     help="成本归零(佣金+印花税均0): 隔离毛收益与交易成本拖累, 用于成本/换手实证(#22)")
+    ap.add_argument("--vol-weight", type=float, default=None,
+                    help="lvrev W_DEFAULT.vol 覆写(低波权重), 用于 A/B 网格搜索")
+    ap.add_argument("--rev-weight", type=float, default=None,
+                    help="lvrev W_DEFAULT.rev 覆写(反转权重), 用于 A/B 网格搜索")
+    ap.add_argument("--q-weight", type=float, default=None,
+                    help="lvrev W_DEFAULT.q 覆写(质量/低杠杆稳定器), 用于 A/B 网格搜索")
+    ap.add_argument("--g-weight", type=float, default=None,
+                    help="lvrev W_DEFAULT.g 覆写(成长稳定器), 用于 A/B 网格搜索")
     args = ap.parse_args()
     STOP_LOSS = args.stop_loss
     MIN_HOLD = max(0, args.min_hold)
@@ -1327,6 +1340,24 @@ def main():
         logger.info("启用入场回踩不破守卫 (pullback-guard)")
     if LOT_MODE:
         logger.info("启用百股取整模式 (--lot): 收益对本金敏感(资本相关), 仅作小账户可执行估计")
+
+    # ---- lvrev 权重覆写 (A/B 网格搜索, monkeypatch W_DEFAULT/W_VALUE) ----
+    import lvrev_scorer as _lvrev_mod
+    _wprov = {}
+    if args.vol_weight is not None: _wprov["vol"] = args.vol_weight
+    if args.rev_weight is not None: _wprov["rev"] = args.rev_weight
+    if args.q_weight is not None: _wprov["q"] = args.q_weight
+    if args.g_weight is not None: _wprov["g"] = args.g_weight
+    WEIGHT_TAG = ""
+    if _wprov:
+        _nd = dict(_lvrev_mod.W_DEFAULT); _nd.update(_wprov)
+        _lvrev_mod.W_DEFAULT = _nd
+        _nv = dict(_lvrev_mod.W_VALUE); _nv.update(_wprov)
+        _lvrev_mod.W_VALUE = _nv
+        for _k in ("vol", "rev", "q", "g"):
+            if _k in _wprov:
+                WEIGHT_TAG += f"_{_k[0]}{_wprov[_k]:.2f}"
+        logger.info(f"lvrev 权重覆写 W_DEFAULT = {_nd} (tag:{WEIGHT_TAG})")
 
     # --capital: 覆盖初始资金, 用于验证权重制本金无关性
     if args.capital is not None:
