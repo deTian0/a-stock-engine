@@ -64,10 +64,11 @@ def score_lvrev(df: pd.DataFrame, value_factor: bool = False,
         s_rev = pd.Series(0.5, index=d.index)
     reversal = s_rev.fillna(0.5)
 
-    # 3) 质量: ROE 越高越好, 负债率越低越好
+    # 3) 质量稳定器: 仅保留低杠杆(debt_ratio), 不再用 ROE 正向排序
+    #    (ROE Rank-IC=-0.078/t=-2.94 显著负, 见#23实证; 高ROE是负alpha,
+    #     用作正向排序偏置会系统性选中跑输股。v4.25: 移除 ROE 排序项, B 项隔离回测
+    #     +0.59%->+10.14%; 注意 W_DEFAULT.q 不可同时下调, 否则与去ROE交互崩至-5.51%)
     s_q = pd.Series(0.5, index=d.index)
-    if "roe" in d.columns:
-        s_q = s_q + d["roe"].clip(-20, 40).fillna(0) / 40.0
     if "debt_ratio" in d.columns:
         s_q = s_q - (d["debt_ratio"].clip(0, 100).fillna(50) / 100.0)
     s_q = s_q.rank(pct=True, na_option="keep").fillna(0.5)
