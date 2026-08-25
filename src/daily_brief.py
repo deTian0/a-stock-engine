@@ -399,6 +399,11 @@ def generate_brief(results: dict, config: dict) -> str:
                 if "close" in all_results.columns:
                     cur_price_map[str(r["code"]).zfill(6)] = r["close"]
 
+        # 持仓实时价优先用 main() 注入的 live 价(results["holding_prices"])。
+        # 旧逻辑: 持仓代码不在 l4_results 时直接回退 cost_price 当"当日股价",
+        # 导致持仓价=成本、盈亏恒为+0.0%、市值失真(2026-08-25 复盘发现)。
+        holding_prices = results.get("holding_prices", {}) or {}
+
         lines.append("| 代码 | 名称 | 当日股价 | 成本 | 盈亏 | 持仓数 | 市值 | 建议 |")
         lines.append("|------|------|---------|------|------|--------|------|------|")
         total_mv = 0
@@ -407,7 +412,10 @@ def generate_brief(results: dict, config: dict) -> str:
             shares = info.get("shares", 0)
             cost = info.get("cost_price", 0)
             name = info.get("name", code_str)
-            cur_price = cur_price_map.get(code_str, cost)
+            # 优先 live 实时价; 缺失再回退候选价/成本(最后手段)
+            cur_price = holding_prices.get(code_str)
+            if cur_price is None:
+                cur_price = cur_price_map.get(code_str, cost)
             pnl = (cur_price - cost) * shares
             pnl_pct = ((cur_price / cost) - 1) * 100 if cost > 0 else 0
             mv = cur_price * shares
@@ -575,6 +583,28 @@ def main():
             logger.error(f"引擎运行失败: {results['error']}")
             print(f"ERROR: {results['error']}")
             sys.exit(1)
+
+        # 持仓追踪: 单独拉取持仓代码实时价并注入 results,
+        # 避免持仓 ETF 不在 l4_results 时把 cost_price 当"当日股价"(旧 bug)。
+        try:
+            _hold_cfg = config.get("account", {}).get("holdings", {}) or {}
+            if _hold_cfg:
+                from westock_helpers import batch_quotes
+                _hcodes = [str(c).zfill(6) for c in _hold_cfg.keys()]
+                _qmap = batch_quotes(_hcodes)
+                _hp = {}
+                for _c in _hcodes:
+                    _q = _qmap.get(_c)
+                    if _q and _q.get("close"):
+                        try:
+                            _hp[_c] = float(_q["close"])
+                        except (TypeError, ValueError):
+                            pass
+                if _hp:
+                    results["holding_prices"] = _hp
+                    logger.info(f"持仓实时价已注入: {_hp}")
+        except Exception as e:
+            logger.warning(f"持仓实时价拉取失败(将回退成本/候选价): {e}")
 
         brief_content = generate_brief(results, config)
         brief_path = save_brief(brief_content, config)
