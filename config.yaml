@@ -103,8 +103,9 @@ account:
   holdings:                       # 当前持仓（来自华宝证券）
     # 格式: code: {name, shares, cost_price}
     # 一手 = 100股，最小买入数 = 1手
-    "159852": {name: "软件ETF嘉实", shares: 1400, cost_price: 0.725}
-    "159869": {name: "游戏ETF华夏", shares: 3700, cost_price: 1.142}
+    "159852": {name: "软件ETF嘉实", shares: 7400, cost_price: 0.683}
+    "159869": {name: "游戏ETF华夏", shares: 3600, cost_price: 1.122}
+    "159552": {name: "中证2000增强ETF招商", shares: 1200, cost_price: 2.284}
 
 # --- 市场环境判断 (L0) ---
 env_regime:
