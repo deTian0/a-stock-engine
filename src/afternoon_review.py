@@ -33,6 +33,7 @@ from westock_cli import get_cli
 from database import get_db
 from local_price_loader import LocalPriceLoader
 from pick_tracker import get_tracking_report, get_tracking_summary, track_picks
+from report_renderer import render_review_report
 
 logger = logging.getLogger(__name__)
 
@@ -259,9 +260,37 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
         lines.append(f"_验证数据获取失败: {e}_\n")
 
     # ============================================================
+    # 3.5 最近一周持仓追踪（与第三节同源，按周聚合）
+    # ============================================================
+    try:
+        weekly = _build_weekly_track(all_stocks, days=7)
+        data["weekly"] = weekly
+        lines.append("\n## 四、最近一周持仓追踪\n")
+        if weekly.get("dates"):
+            s = weekly.get("summary", {})
+            if s:
+                lines.append(
+                    f"- 近7日推荐: {s.get('total_picks')} 只 | 已验证 {s.get('verified')} 只 | "
+                    f"胜率 {s.get('win_rate')}% | 平均持仓收益 {s.get('avg_return')}%"
+                )
+            lines.append("\n| 日期 | 推荐数 | 已验证 | 平均持仓收益 | 胜率 |")
+            lines.append("|------|--------|--------|-------------|------|")
+            for d in weekly["dates"]:
+                lines.append(
+                    f"| {d['date']} | {d['picks']} | {d['verified']} | "
+                    f"{d['avg_return']} | {d['win_rate']} |"
+                )
+        else:
+            lines.append("_暂无近一周选股记录_")
+    except Exception as e:
+        logger.warning(f"周度追踪失败: {e}")
+        data.setdefault("weekly", {"dates": [], "picks": [], "summary": {},
+                                   "chart_dates": [], "chart_avg": [], "chart_count": []})
+
+    # ============================================================
     # 4. 选股命中统计（两周周期追踪 + 累计命中）
     # ============================================================
-    lines.append("\n## 四、选股命中统计\n")
+    lines.append("\n## 五、选股命中统计\n")
     try:
         summary = get_tracking_summary("pre_market")
         if len(summary) > 0:
@@ -328,7 +357,7 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
     # 5. 命中追踪
     # ============================================================
     try:
-        lines.append("\n")
+        lines.append("\n## 六、选股命中追踪\n")
         tracking = get_tracking_report()
         lines.append(tracking)
         data["tracking_md"] = tracking
@@ -457,8 +486,142 @@ def _compute_stop_loss(closes: list[float], close_today: float) -> float | None:
         return None
 
 
+def _build_weekly_track(all_stocks: pd.DataFrame = None, days: int = 7) -> dict:
+    """最近一周早盘推荐持仓追踪（与「三、早盘推荐当日表现」同源，按周聚合）。
+
+    数据源:
+      - stock_picks: 近 N 天每日早盘推荐（code/name/category/composite_score/date）
+      - market.db daily_price: 选股日收盘（首个 date>=pick_date）与最新收盘
+      - 当日 all_stocks: 优先用今日实时收盘作为「最新价」
+    持仓收益 = 最新收盘 / 选股日收盘 - 1（A股 T+1 结算，视为建仓至今未实现盈亏）。
+    全部为只读查询 + 内存计算，无网络调用，CPU-safe。
+    """
+    empty = {"dates": [], "picks": [], "summary": {},
+             "chart_dates": [], "chart_avg": [], "chart_count": []}
+    if all_stocks is None:
+        all_stocks = pd.DataFrame()
+    try:
+        db = get_db()
+        rows = db.conn.execute(
+            "SELECT date, code, name, category, composite_score FROM stock_picks "
+            "WHERE date >= date('now', ?) ORDER BY date DESC",
+            (f"-{days} days",)
+        ).fetchall()
+    except Exception as e:
+        logger.warning(f"周度追踪读取 stock_picks 失败: {e}")
+        return empty
+
+    picks_raw = [dict(r) for r in rows]
+    if not picks_raw:
+        return empty
+
+    # 批量取行情: 选股日收盘 + 最新收盘（按 code 升序 date 聚合）
+    codes = [str(p["code"]).zfill(6) for p in picks_raw]
+    price_map: dict[str, list] = {}
+    try:
+        from database import get_market_db
+        mdb = get_market_db()
+        ph = ",".join("?" for _ in codes)
+        mrows = mdb.conn.execute(
+            f"SELECT code, date, close FROM daily_price "
+            f"WHERE substr(code,1,6) IN ({ph}) ORDER BY code, date",
+            codes
+        ).fetchall()
+        for r in mrows:
+            c = r["code"].split(".")[0].zfill(6) if "." in r["code"] else r["code"]
+            price_map.setdefault(c, []).append((str(r["date"])[:10], float(r["close"])))
+    except Exception as e:
+        logger.warning(f"周度追踪行情读取失败: {e}")
+
+    # 今日实时收盘（优先）
+    today_close: dict[str, float] = {}
+    if len(all_stocks) > 0 and "code" in all_stocks.columns and "close" in all_stocks.columns:
+        for _, r in all_stocks.iterrows():
+            c = str(r.get("code", "")).zfill(6)
+            cl = r.get("close")
+            if pd.notna(cl) and cl and c:
+                today_close[c] = float(cl)
+
+    flat = []
+    for p in picks_raw:
+        code = str(p["code"]).zfill(6)
+        pick_date = p["date"]
+        hist = price_map.get(code, [])
+        pick_close = None
+        for d, cl in hist:
+            if d >= pick_date:
+                pick_close = cl
+                break
+        latest = today_close.get(code)
+        if latest is None and hist:
+            latest = hist[-1][1]
+        ret = None
+        status = "ok"
+        if pick_close and latest and pick_close > 0:
+            ret = round((latest / pick_close - 1) * 100, 2)
+        elif pick_close is None:
+            status = "无基准价"
+        else:
+            status = "无最新价"
+        flat.append({
+            "date": pick_date,
+            "code": code,
+            "name": p.get("name") or code,
+            "category": p.get("category", "-"),
+            "score": float(p["composite_score"]) if p.get("composite_score") is not None else None,
+            "return_pct": ret,
+            "status": status,
+        })
+
+    # 按日期升序汇总
+    dates_out, chart_dates, chart_avg, chart_count = [], [], [], []
+    date_set = sorted({f["date"] for f in flat})
+    for d in date_set:
+        d_picks = [f for f in flat if f["date"] == d]
+        rets = [f["return_pct"] for f in d_picks if f["return_pct"] is not None]
+        avg = round(sum(rets) / len(rets), 2) if rets else None
+        win = int(sum(1 for x in rets if x > 0))
+        dates_out.append({
+            "date": d,
+            "picks": len(d_picks),
+            "verified": len(rets),
+            "avg_return": avg,
+            "win_rate": round(win / len(rets) * 100, 1) if rets else None,
+        })
+        chart_dates.append(d)
+        chart_avg.append(avg)
+        chart_count.append(len(d_picks))
+
+    summary = {}
+    all_rets = [f["return_pct"] for f in flat if f["return_pct"] is not None]
+    if all_rets:
+        arr = np.array(all_rets)
+        summary = {
+            "total_picks": len(flat),
+            "verified": len(all_rets),
+            "win_rate": round(float(np.sum(arr > 0)) / len(arr) * 100, 1),
+            "avg_return": round(float(np.mean(arr)), 2),
+            "best": round(float(np.max(arr)), 2),
+            "worst": round(float(np.min(arr)), 2),
+        }
+
+    return {
+        "dates": dates_out,
+        "picks": flat,
+        "summary": summary,
+        "chart_dates": chart_dates,
+        "chart_avg": chart_avg,
+        "chart_count": chart_count,
+    }
+
+
 # ============================================================
-# HTML 渲染（复用 html_report.py 的 Qbot 风格范式）
+# [已废弃] HTML 渲染
+# 旧版用 f-string + _HTML_CSS 常量，抽成普通字符串后 f-string 插值不塌缩，
+# 导致 CSS 双花括号失效、报告无样式。已于 2026-08-25 起改用模板渲染：
+#   - 模板: src/templates/review_report.html
+#   - 渲染: src/report_renderer.py :: render_review_report()
+# 以下函数仅作历史保留，请勿在新流程中使用。
 # ============================================================
 
 _HTML_CSS = """
@@ -838,13 +1001,17 @@ def main():
 
         # 保存 HTML（新增，便于阅读；归档 + 指针双写）
         try:
-            html = generate_review_html(review_data)
+            html = render_review_report(review_data)
             html_ts = save_dir / f"盘后复盘报告_{ts}.html"
             html_ts.write_text(html, encoding="utf-8")
             logger.info(f"复盘HTML已归档(带时间戳): {html_ts}")
             html_path = save_dir / "盘后复盘报告.html"
             html_path.write_text(html, encoding="utf-8")
             logger.info(f"复盘HTML已保存: {html_path}")
+            # 根目录 latest 指针（向后兼容，prompt 要求刷新）
+            latest_html = Path("history") / "盘后复盘_latest.html"
+            latest_html.write_text(html, encoding="utf-8")
+            logger.info(f"复盘HTML已刷新指针: {latest_html}")
         except Exception as e:
             logger.warning(f"HTML 生成失败（不影响 Markdown）: {e}")
 
