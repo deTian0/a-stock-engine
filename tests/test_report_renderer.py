@@ -1,7 +1,7 @@
 """report_renderer 单元测试：格式化助手 + 渲染（正常/边界/NaN 健壮性）。
 
-重点: _fmt_pct / _fmt_num / _fmt_amt 必须正确处理 NaN（当前实现会输出 "nan%",
-这是真实 bug，见下方会失败的断言）。
+重点: _fmt_pct / _fmt_num / _fmt_amt 正确处理 NaN -> '-'；_fmt_num 对 0 显示
+'0.00'（不当缺失, 见 test_fmt_num_zero_shows_zero, 修复旧实现把 0 当 '-' 的误导）。
 """
 import sys
 from pathlib import Path
@@ -40,8 +40,10 @@ def test_fmt_pct_nan_shows_dash():
     assert rr._fmt_pct(np.nan) == "-"
 
 
-def test_fmt_num_zero_dash():
-    assert rr._fmt_num(0) == "-"
+def test_fmt_num_zero_shows_zero():
+    # 修复: 0 是有效值, 不应渲染成缺失 '-'（旧实现会误显示）
+    assert rr._fmt_num(0) == "0.00"
+    assert rr._fmt_num(0.0) == "0.00"
     assert rr._fmt_num(None) == "-"
 
 

@@ -1,7 +1,7 @@
 """ta_wrapper 单元测试：技术指标（正常/边界/异常）。
 
-注意: compute_rsi/compute_macd/compute_atr 在有 ta 库时走 ta 分支、否则走 numpy 回退。
-测试只断言两种实现都满足的**不变量**，保证确定性。
+注意: compute_rsi/compute_macd/compute_atr 现统一走 numpy 实现（ta 死代码已清除,
+见模块 docstring）。预热期 RSI 返回 NaN（与 pandas rolling 一致）。
 """
 import sys
 from pathlib import Path
@@ -40,14 +40,25 @@ def test_compute_rsi_in_range():
     rng = np.random.default_rng(0)
     close = 100 + np.cumsum(rng.normal(0, 1, 60))
     rsi = ta_wrapper.compute_rsi(close, 14)
-    assert np.all((rsi >= 0) & (rsi <= 100))
+    # 预热期 (前 period-1) 为 NaN, 仅校验有效段
+    assert np.all(np.isnan(rsi[:13]))
+    assert np.all((rsi[13:] >= 0) & (rsi[13:] <= 100))
 
 
-def test_compute_rsi_short_series_fallback_no_crash():
-    # 短序列即使 ta 不可用也应返回有限值（不抛、不 NaN 爆炸）
+def test_compute_rsi_short_series_returns_nan():
+    # 短于 period: 全序列处于预热期, 返回 NaN（不抛、不虚假有限值）
     close = np.array([1.0, 2.0, 3.0])
     rsi = ta_wrapper.compute_rsi(close, 14)
-    assert np.all(np.isfinite(rsi))
+    assert len(rsi) == 3
+    assert np.all(np.isnan(rsi))
+
+
+def test_compute_rsi_warmup_is_nan():
+    # F 修复: 预热期部分窗口均值无效, 必须 NaN 而非虚假值
+    close = np.arange(1, 40, dtype=float)  # 严格单调, 全有效段 RSI=100
+    rsi = ta_wrapper.compute_rsi(close, 14)
+    assert np.all(np.isnan(rsi[:13]))              # period-1 预热点
+    assert np.all(rsi[13:] == pytest.approx(100.0, abs=1e-6))
 
 
 def test_compute_macd_bar_invariant():

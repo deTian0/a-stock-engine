@@ -1,7 +1,9 @@
 """verify_picks 单元测试：代码归一化 / 简报解析 / 验证报告（正常/边界/异常）。
 
-重点: generate_verification_report 中「验证成功率」实为**数据可用率**（status==success 占比），
-而非胜率（正收益占比）——标签存在语义误导（见下方文档化断言）。
+重点: generate_verification_report 中「数据齐备率」为 T+2 价格可获取占比,
+      与「胜率」（正收益占比）已明确区分, 不再混用「验证成功率」误导标签
+      （见 test_generate_report_data_completeness_rate）。简报解析按列名定位
+      （见 test_load_picks_from_brief_column_order_insensitive）。
 """
 import sys
 from pathlib import Path
@@ -77,13 +79,14 @@ def test_generate_report_win_rate_correct():
     assert "平均涨幅" in rep
 
 
-def test_generate_report_success_rate_equals_success_over_total():
-    # 文档化「验证成功率」的语义: success/total, 而非胜率
+def test_generate_report_data_completeness_rate():
+    # 「数据齐备率」语义: success/total（价格可获取占比）, 已与「胜率」区分
     vr = [_vr_with_returns([5.0, -3.0]), _vr_with_returns([None])]
     rep = vp.generate_verification_report(vr)
-    # 2 成功 / 3 总 = 66.7% 验证成功率
-    assert "验证成功率" in rep
-    assert "66.7%" in rep.split("验证成功率")[1].split("\n")[0]
+    # 2 成功 / 3 总 = 66.7% 数据齐备率
+    assert "数据齐备率" in rep
+    assert "验证成功率" not in rep          # 误导标签已移除
+    assert "66.7%" in rep.split("数据齐备率")[1].split("\n")[0]
 
 
 def test_generate_report_empty():

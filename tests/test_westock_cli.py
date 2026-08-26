@@ -1,7 +1,7 @@
 """westock_cli 单元测试：代码前缀路由 + 表格解析 + 数值强转（正常/边界/异常）。
 
-重点: _to_ws_code 与已修的 westock_helpers._to_ws 有**同样的 ETF 前缀 bug**——
-沪市 ETF(5xxxx) 会被错路由成 sz，这是主 CLI 路径的真实 bug。
+重点: _to_ws_code 现已**委托**给 westock_helpers._to_ws（单一事实来源, 见 B 修复），
+沪市 ETF(5xxxx) 正确路由到 sh。此测试同时保证委托后行为等价、ETF 前缀不再漏修。
 """
 import sys
 from pathlib import Path
@@ -27,7 +27,7 @@ def test_to_ws_code_bj():
 
 
 def test_to_ws_code_etf_routing_shanghai():
-    # BUG 捕获: 沪市 ETF(5xxxx) 必须路由到 sh, 当前返回 sz (错误)
+    # 沪市 ETF(5xxxx) 经委托正确路由到 sh（B 修复: 单一事实来源, 不再漏修）
     assert westock_cli._to_ws_code("515790") == "sh515790"   # 光伏ETF
     assert westock_cli._to_ws_code("510050") == "sh510050"   # 上证50ETF
     assert westock_cli._to_ws_code("512880") == "sh512880"   # 证券ETF
