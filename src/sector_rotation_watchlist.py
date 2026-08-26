@@ -10,9 +10,11 @@ sector_rotation_watchlist.py - 板块轮动监控
 import sys
 import os
 import logging
+import sqlite3
 import yaml
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 import numpy as np
@@ -23,6 +25,78 @@ from westock_cli import get_cli
 from guard import setup_protection, teardown_protection, setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def hot_industry_set(db_path: str = "data_cache/market.db",
+                     as_of: Optional[str] = None,
+                     hot_n: int = 6,
+                     mom_window: int = 60) -> set:
+    """point-in-time 热门行业集合 —— 供 multifactor 行业 tilt 使用（方向C）。
+
+    定义（与回测验证台 empirical/walk_forward_oos_paths.compute_hot_sectors 完全一致）:
+      对决策日 t, 取各申万行业组内成分股的 mom_window 日(<=t)中位收益,
+      取收益最高的 top-hot_n 行业作为"热门行业"。仅用 <= t 的 daily_price 数据(无前视)。
+
+    Args:
+        db_path:    market.db 路径（内含 daily_price + fundamentals.industry）
+        as_of:      'YYYY-MM-DD' 或 None（默认用 daily_price 最新交易日）
+        hot_n:      热门行业数量
+        mom_window: 动量窗口（交易日）
+    Returns:
+        set[str]: 热门行业名集合（空串/未知 不会入选）
+    """
+    try:
+        c = sqlite3.connect(db_path)
+        if as_of is None:
+            as_of = c.execute("SELECT MAX(date) FROM daily_price").fetchone()[0]
+        as_of_ts = pd.Timestamp(as_of)
+        # 窗口起点：足够日历日覆盖 mom_window 个交易日
+        start = str((as_of_ts - pd.Timedelta(days=mom_window * 2)).date())
+        px = pd.read_sql_query(
+            "SELECT code, date, close FROM daily_price "
+            "WHERE date <= ? AND date >= ?",
+            c, params=(str(as_of_ts.date()), start))
+        ind = pd.read_sql_query(
+            "SELECT code, industry FROM fundamentals WHERE industry IS NOT NULL", c)
+        c.close()
+        if len(px) == 0 or len(ind) == 0:
+            return set()
+
+        px["code"] = (px["code"].astype(str)
+                      .str.replace(r"\.(SZ|SH|BJ)$", "", regex=True))
+        ind["code"] = (ind["code"].astype(str)
+                       .str.replace(r"\.(SZ|SH|BJ)$", "", regex=True))
+        ind_map = dict(zip(ind["code"], ind["industry"].fillna("")))
+        px["industry"] = px["code"].map(ind_map).fillna("")
+        px["date"] = pd.to_datetime(px["date"])
+
+        last = px[px["date"] <= as_of_ts]
+        g = last.groupby("code", sort=False)
+
+        def _mom(x: pd.DataFrame) -> float:
+            x = x.sort_values("date")
+            closes = x["close"].values
+            if len(closes) >= mom_window + 1:
+                return float(closes[-1] / closes[-(mom_window + 1)] - 1.0)
+            elif len(closes) >= 2:
+                return float(closes[-1] / closes[0] - 1.0)
+            return float("nan")
+
+        mom = g.apply(_mom).reset_index()
+        mom.columns = ["code", "mom"]
+        valid = mom.dropna(subset=["mom"])
+        valid = valid.merge(
+            px[["code", "industry"]].drop_duplicates("code"),
+            on="code", how="left")
+        valid = valid[valid["industry"].astype(str).str.len() > 0]
+        if len(valid) < 50:
+            return set()
+        med = (valid.groupby("industry")["mom"].median()
+               .sort_values(ascending=False))
+        return set(med.head(hot_n).index)
+    except Exception as e:
+        logger.warning(f"hot_industry_set 计算失败: {e}")
+        return set()
 
 
 class SectorRotationWatcher:

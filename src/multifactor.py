@@ -85,9 +85,18 @@ class MultiFactorEngine:
         self.lvrev_ey_weight = float(lv.get("ey_weight", 0.0))
         self.lvrev_reversal_q = float(lv.get("reversal_q", 0.30))
         self.lvrev_apply_gate = bool(lv.get("apply_entry_gate", False))
+        # === 方向C: 行业轮动 tilt(opt-in, 与回测验证台 C 一致) ===
+        st = lv.get("sector_tilt", {})
+        self.lvrev_sector_tilt_enabled = bool(st.get("enabled", False))
+        self.lvrev_tilt_boost = float(st.get("tilt_boost", 1.3))
+        self.lvrev_hot_n = int(st.get("hot_n", 6))
+        self.lvrev_mom_window = int(st.get("mom_window", 60))
         logger.info(f"L4 内核: use_lvrev_kernel={self.use_lvrev_kernel} "
                     f"(value_factor={self.lvrev_value_factor}, ey={self.lvrev_ey_weight}, "
-                    f"q={self.lvrev_reversal_q}, apply_gate={self.lvrev_apply_gate})")
+                    f"q={self.lvrev_reversal_q}, apply_gate={self.lvrev_apply_gate}, "
+                    f"sector_tilt={self.lvrev_sector_tilt_enabled}"
+                    f"(boost={self.lvrev_tilt_boost}, hot_n={self.lvrev_hot_n}, "
+                    f"win={self.lvrev_mom_window})")
 
     def _load_config(self, path: str) -> dict:
         path = Path(path)
@@ -277,6 +286,16 @@ class MultiFactorEngine:
             except (ValueError, TypeError):
                 return default
 
+        def _safe_str(key, default=""):
+            """安全提取字符串（行业等），无效/空返回 default。"""
+            val = row.get(key)
+            if val is None:
+                return default
+            s = str(val)
+            if s.lower() in ("nan", "none", "null", ""):
+                return default
+            return s
+
         return {
             "pe": _safe_float("pe", min_val=0.01),        # PE=0 无效，排除
             "pb": _safe_float("pb", min_val=0.01),
@@ -286,6 +305,7 @@ class MultiFactorEngine:
             "revenue_growth": _safe_float("revenue_growth"),
             "profit_growth": _safe_float("profit_growth"),
             "market_cap": _safe_float("market_cap", min_val=0),
+            "industry": _safe_str("industry"),            # 申万行业(方向C tilt 用)
             "name": str(row.get("name", "")) if "name" in row else "",
         }
 
@@ -646,6 +666,28 @@ class MultiFactorEngine:
             value_factor=self.lvrev_value_factor,
             ey_weight=self.lvrev_ey_weight,
         )
+
+        # === 方向C: 行业轮动 tilt(opt-in, 与回测验证台 C 一致) ===
+        # 对热门行业(申万, mom_window 日中位动量 top-hot_n)内的候选,
+        # composite_score × tilt_boost, 使其更易进入 ②A 质量榜。
+        # 仅作评分加分(仍走 lvrev 低波/反转闸门), 不绕过内核 —— 治本非治标。
+        if self.lvrev_sector_tilt_enabled:
+            try:
+                from sector_rotation_watchlist import hot_industry_set
+                hot = hot_industry_set(as_of=None, hot_n=self.lvrev_hot_n,
+                                       mom_window=self.lvrev_mom_window)
+                if hot:
+                    ind = scored.get("industry", pd.Series("", index=scored.index))
+                    ind = ind.fillna("").astype(str)
+                    boost = np.where(ind.isin(hot), self.lvrev_tilt_boost, 1.0)
+                    scored["composite_score"] = scored["composite_score"] * boost
+                    n_hit = int((boost > 1.0).sum())
+                    logger.info(f"  行业 tilt: 热门行业 {sorted(hot)} | "
+                                f"命中候选 {n_hit} 只 ×{self.lvrev_tilt_boost}")
+                else:
+                    logger.info("  行业 tilt: 无热门行业(数据不足), 跳过")
+            except Exception as e:
+                logger.warning(f"  行业 tilt 计算失败(跳过): {e}")
 
         # 入场风控闸门标记(始终计算, 供简报展示"是否到买点")
         keep = apply_entry_gates(scored, reversal_q=self.lvrev_reversal_q)
