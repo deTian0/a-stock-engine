@@ -47,10 +47,16 @@ def _esc(val) -> str:
 
 
 def _fmt_pct(v) -> str:
-    """带符号百分比；None/缺失显示 '-'（涨 + 跌 -，符合 A 股红涨绿跌观感）。"""
+    """带符号百分比；None/NaN/缺失显示 '-'（涨 + 跌 -，符合 A 股红涨绿跌观感）。"""
     if v is None:
         return "-"
-    return f"{v:+.1f}%"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    if f != f:  # NaN
+        return "-"
+    return f"{f:+.1f}%"
 
 
 def _cls(v) -> str:
@@ -59,12 +65,14 @@ def _cls(v) -> str:
 
 
 def _fmt_num(v, nd: int = 2) -> str:
-    """普通数值格式化；0 / None 显示 '-'。"""
+    """普通数值格式化；0 / None / NaN 显示 '-'。"""
     if v is None:
         return "-"
     try:
         f = float(v)
     except (TypeError, ValueError):
+        return "-"
+    if f != f:  # NaN
         return "-"
     if f == 0:
         return "-"
@@ -72,12 +80,14 @@ def _fmt_num(v, nd: int = 2) -> str:
 
 
 def _fmt_amt(v) -> str:
-    """成交额(亿)格式化，1 位小数。"""
+    """成交额(亿)格式化，1 位小数；None / NaN 显示 '-'。"""
     if v is None:
         return "-"
     try:
         f = float(v)
     except (TypeError, ValueError):
+        return "-"
+    if f != f:  # NaN
         return "-"
     return f"{f:.1f}"
 

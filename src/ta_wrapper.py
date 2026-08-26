@@ -26,8 +26,15 @@ def compute_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     losses = np.where(deltas < 0, -deltas, 0)
     avg_gain = np.convolve(gains, np.ones(period)/period, mode='full')[:len(close)]
     avg_loss = np.convolve(losses, np.ones(period)/period, mode='full')[:len(close)]
+    # RS = avg_gain / avg_loss; 边界: 纯上涨(avg_loss==0)→RSI=100, 纯下跌(avg_gain==0)→0,
+    # 横盘(两者皆0)→50(中性)。原实现用 np.divide(where=avg_loss!=0) 在纯上涨时给 rs=0
+    # → 返回 0, 与「RSI=100」定义相悖 (见 test_compute_rsi_monotonic_up_is_100)。
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    return 100 - 100 / (1 + rs)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.where(avg_loss == 0,
+                   np.where(avg_gain == 0, 50.0, 100.0),
+                   np.where(avg_gain == 0, 0.0, rsi))
+    return rsi
 
 
 def compute_macd(close: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9):
