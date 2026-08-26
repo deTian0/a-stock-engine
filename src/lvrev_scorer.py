@@ -34,18 +34,15 @@ W_DEFAULT = dict(vol=0.45, rev=0.35, value=0.0, q=0.12, g=0.0)
 W_VALUE = dict(vol=0.38, rev=0.27, value=0.18, q=0.10, g=0.0)
 
 
-def score_lvrev(df: pd.DataFrame, value_factor: bool = False,
-                ey_weight: float = 0.0) -> pd.DataFrame:
-    """低波+反转+质量+成长(+可选价值/ey) 评分内核。返回带 composite_score 的 df。
+def factor_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """各因子的 point-in-time 归一化得分(均映射到 [0,1], 且方向已对齐预期收益)。
 
-    与 local_backtest._score_lowvol_rev 数学等价; 行为由调用方传入的
-    value_factor / ey_weight 控制(默认关价值、ey=0 -> 还原 +26.1% 基线权重)。
+    返回列: low_vol(波动越低分越高) / reversal(越超跌分越高) / quality(杠杆越低分越高)
+            / growth(营收增速越高分越高) / value(越便宜分越高)。
+    这是权重重估(M2)与组合评分共用的事实来源: 调整权重只需缩放这些得分,
+    不改变因子方向语义, 杜绝"重写评分逻辑"导致的漂移。
     """
-    if len(df) == 0:
-        df = df.copy()
-        df["composite_score"] = 0.0
-        return df
-    d = df.copy()
+    d = df
     n = len(d)
 
     # 1) 低波动: 波动率越低越好 -> (1 - 排名)
@@ -96,6 +93,31 @@ def score_lvrev(df: pd.DataFrame, value_factor: bool = False,
     else:
         value = pd.Series(0.5, index=d.index)
 
+    return pd.DataFrame({
+        "low_vol": low_vol, "reversal": reversal, "quality": quality,
+        "growth": growth, "value": value,
+    }, index=d.index)
+
+
+def score_lvrev(df: pd.DataFrame, value_factor: bool = False,
+                ey_weight: float = 0.0, weights: dict | None = None
+                ) -> pd.DataFrame:
+    """低波+反转+质量+成长(+可选价值/ey) 评分内核。返回带 composite_score 的 df。
+
+    与 local_backtest._score_lowvol_rev 数学等价; 行为由调用方传入的
+    value_factor / ey_weight / weights 控制。
+      - 默认 weights=None -> 用 W_VALUE/W_DEFAULT(还原 +26.1% 基线权重)。
+      - 传入 weights(dict) -> 按自定义系数缩放 factor_scores(供 M2 滚动权重重估)。
+    权重键: vol / rev / value / q / g(缺失键按 0 计)。
+    """
+    if len(df) == 0:
+        df = df.copy()
+        df["composite_score"] = 0.0
+        return df
+    d = df.copy()
+
+    fs = factor_scores(d)
+
     # 6) ey(盈利收益率 1/pe_ttm) 加性价值维度(可选): 不稀释低波/反转,
     #    仅当 ey_weight>0 时作为额外加分项(1/pe 越高=越便宜)。
     if ey_weight > 0 and "pe" in d.columns:
@@ -104,10 +126,17 @@ def score_lvrev(df: pd.DataFrame, value_factor: bool = False,
     else:
         ey_rank = 0.0
 
-    w = dict(W_VALUE) if value_factor else dict(W_DEFAULT)
+    if weights is None:
+        w = dict(W_VALUE) if value_factor else dict(W_DEFAULT)
+    else:
+        w = {k: float(v) for k, v in weights.items()}
+
     d["composite_score"] = (
-        w["vol"] * low_vol + w["rev"] * reversal +
-        w["value"] * value + w["q"] * quality + w["g"] * growth
+        w.get("vol", 0.0) * fs["low_vol"]
+        + w.get("rev", 0.0) * fs["reversal"]
+        + w.get("value", 0.0) * fs["value"]
+        + w.get("q", 0.0) * fs["quality"]
+        + w.get("g", 0.0) * fs["growth"]
         + ey_weight * ey_rank
     )
     return d.sort_values("composite_score", ascending=False)

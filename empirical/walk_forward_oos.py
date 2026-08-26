@@ -149,7 +149,8 @@ def gate_vectorized(df: pd.DataFrame, reversal_q: float = REVERSAL_Q) -> pd.Seri
 # ============ 组合模拟(复刻 v4.26 run_portfolio) ============
 def run_strategy(px: pd.DataFrame, day_frames: dict, mkt_avg: pd.Series,
                  mkt_ma60: pd.Series, start: str, end: str,
-                 initial: float = INITIAL_CAPITAL) -> dict:
+                 initial: float = INITIAL_CAPITAL,
+                 weight_override: dict | None = None) -> dict:
     all_dates = pd.to_datetime(sorted(px["date"].unique()))
     fold_dates = [d for d in all_dates
                   if (pd.Timestamp(start) <= d <= pd.Timestamp(end))]
@@ -205,7 +206,8 @@ def run_strategy(px: pd.DataFrame, day_frames: dict, mkt_avg: pd.Series,
         if not regime_pass or cash < 5000 or day is None or len(day) == 0:
             continue
 
-        scored = score_lvrev(day, value_factor=False, ey_weight=0.0)
+        scored = score_lvrev(day, value_factor=False, ey_weight=0.0,
+                              weights=weight_override)
         mask = gate_vectorized(scored, REVERSAL_Q)
         cand = scored[mask & ~scored["code"].isin(set(positions.keys()))]
         cand = cand.head(MAX_PICKS_PER_DAY * 3)  # 复刻: 仅评估头部候选
