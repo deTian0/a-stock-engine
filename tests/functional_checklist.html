@@ -1,0 +1,369 @@
+<!doctype html><html lang='zh'><head><meta charset='utf-8'><title>a-stock-engine 功能清单</title><style>
+body{font-family:-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+max-width:980px;margin:32px auto;padding:0 20px;color:#1f2328;line-height:1.6;}
+h1,h2,h3{color:#0b5cad;border-bottom:1px solid #eaecef;padding-bottom:6px;}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px;}
+th,td{border:1px solid #d0d7de;padding:6px 9px;text-align:left;vertical-align:top;}
+th{background:#f3f6fa;font-weight:600;}
+code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12px;}
+blockquote{background:#fff8e6;border-left:4px solid #f0c000;padding:8px 14px;margin:12px 0;}
+pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto;}
+</style></head><body><h1>a-stock-engine 功能清单 (Functional Checklist)</h1>
+<blockquote>
+<p>生成日期：2026-08-26 | 用途：作为 <code>tests/</code> 测试套件的覆盖依据
+范围：枚举核心公开方法的<strong>功能 / 输入 / 输出 / 依赖 / 边界条件 / 异常分支</strong>，并映射测试覆盖。
+说明：工程为 Python（pytest），非 Java/JUnit；用户所述"JUnit 测试"在本工程以等价 pytest 实现。</p>
+</blockquote>
+<hr />
+<h2>1. 测试环境与约定</h2>
+<ul>
+<li>解释器：<code>D:/env/python3.12/python.exe</code>（含 pandas / numpy / pyyaml）</li>
+<li>框架：pytest 9.x</li>
+<li>网络函数（westock_helpers / akshare_provider / tushare_provider）<strong>一律用假子进程 stdout 或 mock 替代</strong>，保证离线确定性。</li>
+<li>纯函数（risk_module.allocate_basket、lvrev_scorer.score_lvrev、daily_brief.generate_brief）直接构造桩数据测试。</li>
+<li>提交纪律：每完成一个小变动即 <code>commit + push</code>，每次 commit 后 <code>git rev-parse HEAD</code> 核验 ref 真前进（防本机 packed-refs 陷阱）。</li>
+</ul>
+<hr />
+<h2>2. 核心已测模块详述</h2>
+<h3>2.1 <code>risk_module.py</code></h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>功能</th>
+<th>输入</th>
+<th>输出</th>
+<th>边界/异常</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>allocate_basket(scores, budget, method="score_weighted", max_single=None)</code></td>
+<td>按评分/等权分配仓位预算</td>
+<td><code>scores: list[float]</code>, <code>budget: float</code>(0~1), <code>method: "score_weighted"\|"equal"</code>, <code>max_single: float\|None</code></td>
+<td><code>list[float]</code> 各票权重，和为 budget</td>
+<td>空→<code>[]</code>；budget≤0→全 0；全零评分→退回等权；未知 method→退回等权；<code>max_single</code> 仅硬性截断<strong>原超限项</strong>，余量补给未超限项（不二次归一截断）</td>
+</tr>
+<tr>
+<td><code>enrich_risk_metrics(df, regime_cap=0.6, total_capital=1e6)</code></td>
+<td>计算 ATR 止损/流动性标签/板块集中度警告</td>
+<td>df 含 <code>code,composite_score,sector,amount,close</code></td>
+<td>增加 <code>stop_loss/atr14/liquidity_tag/sector_warning</code> 列</td>
+<td>空 df→空；依赖 <code>batch_kline</code>（mock）；同板块≥3 只触发"同板块N只"警告</td>
+</tr>
+</tbody>
+</table>
+<h3>2.2 <code>lvrev_scorer.py</code></h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>功能</th>
+<th>输入</th>
+<th>输出</th>
+<th>边界/异常</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>score_lvrev(df, value_factor=False, ...)</code></td>
+<td>lvrev 内核打分（低波+反转+质量+成长）</td>
+<td>含 <code>vol20,reversal20,...</code> 的 df</td>
+<td>增加 <code>composite_score</code>(百分制) 列</td>
+<td>缺列→依赖 df 预处理；空 df→空</td>
+</tr>
+<tr>
+<td><code>apply_entry_gates(df, reversal_q=0.30)</code></td>
+<td>入场闸门（低波+反转双重门控）</td>
+<td>df + <code>composite_score</code></td>
+<td><code>Series[bool]</code> entry_ok</td>
+<td>缺失项→False</td>
+</tr>
+</tbody>
+</table>
+<h3>2.3 <code>daily_brief.py</code></h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>功能</th>
+<th>输入</th>
+<th>输出</th>
+<th>边界/异常</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>generate_brief(results, config)</code></td>
+<td>生成盘前/盘后 Markdown 简报</td>
+<td><code>results</code>(regime/categories/etf_picks/holding_prices/timestamp...), <code>config</code></td>
+<td>str(Markdown)</td>
+<td>持仓追踪优先用 <code>results["holding_prices"]</code> 实时价；缺失→回退选股候选 <code>close</code>；再缺失→回退 <code>config.account.holdings.cost_price</code>（旧 bug 已修）；无注入不崩溃</td>
+</tr>
+<tr>
+<td><code>save_brief(content, config)</code></td>
+<td>落盘简报到 <code>history/YYYY-MM-DD/</code></td>
+<td>Markdown 文本</td>
+<td>Path</td>
+<td>IO 异常上抛</td>
+</tr>
+<tr>
+<td><code>_premarket_window_ok(config)</code></td>
+<td>盘前护栏（09:30 截止）</td>
+<td>config(含时间)</td>
+<td><code>(bool, str)</code></td>
+<td>越界→拦截</td>
+</tr>
+<tr>
+<td><code>main()</code></td>
+<td>编排：取数→评分→生成→落盘</td>
+<td>CLI args</td>
+<td>退出码</td>
+<td>引擎失败→exit(1)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>持仓追踪修复点（本任务关键 bug）</strong>：旧逻辑 <code>cur_price = cur_price_map.get(code, cost)</code> 对不在选股候选的持仓 ETF 直接回退 <code>cost_price</code> 当"当日股价"，导致股价=成本、盈亏恒 +0.0%。修复：<code>main()</code> 用 <code>batch_quotes</code> 单独拉实时价注入 <code>holding_prices</code>，<code>generate_brief</code> 优先采用。</p>
+<h3>2.4 <code>westock_helpers.py</code></h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>功能</th>
+<th>输入</th>
+<th>输出</th>
+<th>边界/异常</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>batch_quotes(codes)</code></td>
+<td>批量实时行情（经 <code>npx westock</code> 子进程）</td>
+<td><code>list[code]</code></td>
+<td><code>{code: {close,...}}</code></td>
+<td>子进程失败→异常；经 <code>_to_ws</code> 加前缀</td>
+</tr>
+<tr>
+<td><code>_to_ws(code)</code></td>
+<td>6 位码→<code>sh/sz/bj</code> 前缀（<strong>已修 bug</strong>）</td>
+<td><code>str</code></td>
+<td><code>sh\|sz\|bj + code</code></td>
+<td>沪 <code>5/6/9</code> 开头、深 <code>0/1/2/3</code> 开头、北交所 <code>4/8</code> 开头；<strong>旧实现误将 <code>1xxxx</code>(深 ETF) 与 <code>5xxxx</code>(沪 ETF) 都归 <code>sz/bj</code>，导致持仓 live 价在生产失效</strong>——已修正</td>
+</tr>
+<tr>
+<td><code>batch_kline(code, days)</code></td>
+<td>批量 K 线（mock 用）</td>
+<td>code</td>
+<td>K 线 dict</td>
+<td>子进程失败→异常</td>
+</tr>
+</tbody>
+</table>
+<h3>2.5 集成 <code>tests/test_integration.py</code></h3>
+<ul>
+<li>串联 <code>score_lvrev</code> → <code>allocate_basket</code>：正常/边界/异常数据流。</li>
+<li><code>generate_brief</code> 完整简报：注入 <code>holding_prices</code>、空头/多头 regime、盘前/盘后 session。</li>
+<li>验证不崩溃、输出结构完整、关键文字存在。</li>
+</ul>
+<h3>2.6 三套数据校验 <code>tests/test_datasets.py</code></h3>
+<table>
+<thead>
+<tr>
+<th>数据集</th>
+<th>特征</th>
+<th>验证目标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A 多头全候选</td>
+<td>regime 多头 + 完整候选列</td>
+<td>正常路径稳定</td>
+</tr>
+<tr>
+<td>B 空头空候选</td>
+<td>regime 空头 + 候选为空</td>
+<td>空数据不崩溃</td>
+</tr>
+<tr>
+<td>C 脏数据</td>
+<td>缺 <code>composite_score/roe/sector/close</code> 等可选列</td>
+<td><code>.get</code> 兜底/异常分支健壮</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>3. 全模块公开方法索引（测试映射）</h2>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>关键公开方法</th>
+<th>用途</th>
+<th>已单测</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>risk_module</td>
+<td>allocate_basket, enrich_risk_metrics</td>
+<td>仓位分配 / 风控标签</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>lvrev_scorer</td>
+<td>score_lvrev, apply_entry_gates</td>
+<td>lvrev 内核打分 / 入场闸门</td>
+<td>✅(score_lvrev 集成覆盖)</td>
+</tr>
+<tr>
+<td>daily_brief</td>
+<td>generate_brief, save_brief, main, _premarket_window_ok</td>
+<td>简报生成 / 落盘 / 护栏</td>
+<td>✅(generate_brief)</td>
+</tr>
+<tr>
+<td>westock_helpers</td>
+<td>batch_quotes, batch_kline, _to_ws</td>
+<td>行情/前缀</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>multifactor</td>
+<td>MultiFactorEngine.assess_regime/filter_l2/...</td>
+<td>多因子引擎</td>
+<td>部分(集成)</td>
+</tr>
+<tr>
+<td>afternoon_review</td>
+<td>review_sectors, generate_review_html, main</td>
+<td>盘后复盘 HTML</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>backtest</td>
+<td>run_backtest, generate_report</td>
+<td>回测引擎</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>verify_picks</td>
+<td>(T+2 验证)</td>
+<td>命中验证</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>reward_attribution</td>
+<td>(收益归因)</td>
+<td>归因</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>factor_engine</td>
+<td>score_stocks, apply_risk_gates, pick_top_by_sector</td>
+<td>因子打分</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>data_enricher</td>
+<td>enrich_l4_results, grade_signal</td>
+<td>L4 富集</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>enrich_short</td>
+<td>calc_rsi, calc_kdj, enrich</td>
+<td>短线指标</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>local_price_loader</td>
+<td>get_price, calc_*</td>
+<td>本地价/指标</td>
+<td>待补</td>
+</tr>
+<tr>
+<td>akshare_provider/tushare_provider</td>
+<td>get_*</td>
+<td>数据源</td>
+<td>mock 预留</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>4. 测试覆盖矩阵</h2>
+<table>
+<thead>
+<tr>
+<th>测试文件</th>
+<th>用例数</th>
+<th>覆盖</th>
+<th>边界</th>
+<th>异常</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>test_risk_module.py</td>
+<td>13</td>
+<td>allocate 正常/equal/未知method</td>
+<td>空/零/负预算/全零评分</td>
+<td>max_single 截断再分配</td>
+</tr>
+<tr>
+<td>test_lvrev_scorer.py</td>
+<td>6</td>
+<td>score_lvrev 打分排序</td>
+<td>空 df</td>
+<td>异常分支</td>
+</tr>
+<tr>
+<td>test_daily_brief.py</td>
+<td>~8</td>
+<td>generate_brief 各节/持仓修复</td>
+<td>空候选/无注入</td>
+<td>缺失字段兜底</td>
+</tr>
+<tr>
+<td>test_westock_helpers.py</td>
+<td>~8</td>
+<td>batch_quotes/mock 子进程/_to_ws 各前缀</td>
+<td>空列表</td>
+<td>子进程失败</td>
+</tr>
+<tr>
+<td>test_integration.py</td>
+<td>5</td>
+<td>管线串联/盘前盘后/空头多头</td>
+<td>—</td>
+<td>脏数据</td>
+</tr>
+<tr>
+<td>test_datasets.py</td>
+<td>3 数据集</td>
+<td>三套数据校验</td>
+<td>—</td>
+<td>缺列兜底</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td><strong>45</strong></td>
+<td><strong>全绿</strong></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>5. 本轮测试发现的真实 Bug（已修）</h2>
+<ol>
+<li><strong><code>westock_helpers._to_ws</code> 代码前缀映射错误</strong>：将深市 ETF <code>1xxxx</code> 与沪市 ETF <code>5xxxx</code> 错判，导致持仓 live 价在生产环境查不到、回退成本（持仓追踪修复点失效）。已修正为按沪深北交易所规则映射。</li>
+<li><strong><code>daily_brief</code> 持仓追踪回退成本当股价</strong>（前序任务）：已修，本报告 Task 1 已提交。</li>
+</ol>
+<hr />
+<h2>6. 后续测试扩展建议（非本次范围）</h2>
+<ul>
+<li>afternoon_review / backtest / verify_picks / reward_attribution / factor_engine 的单元与集成测试。</li>
+<li><code>guard</code> 磁盘/信号保护、<code>health_check</code> 各源连通性（mock 外部）。</li>
+<li>CI 集成：每次 push 跑 <code>pytest tests/ -q</code>。</li>
+</ul></body></html>
