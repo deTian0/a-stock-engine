@@ -109,3 +109,69 @@ def test_assess_regime_bear(monkeypatch):
     res = eng.assess_regime()
     assert res["regime"] == "空头"
     assert res["position_cap"] == 0.2
+
+
+def test_select_etfs_avoids_stale_db_and_uses_live(monkeypatch, caplog):
+    """回归测试：DB 动量快照过期时，必须回退实时行情，绝不输出冻结的虚假动量。
+
+    复现 2026-08 线上 bug：market.db 的 ETF daily_price 停留在 2026-03-13，
+    旧逻辑直接采用冻结动量 => 每日早盘 ETF 推荐完全一样。
+    """
+    import logging
+    cfg = {"data_source": {"cache_dir": "data_cache"}, "output": {}}
+    eng = _engine(monkeypatch, cfg)
+
+    # 模拟 DB 返回冻结快照（as_of 远超 10 天）
+    stale = {
+        "515790": {"momentum_20d": 6.4, "momentum_60d": -1.0, "as_of": "2026-03-13"},
+        "510500": {"momentum_20d": 1.1, "momentum_60d": 2.0, "as_of": "2026-03-13"},
+    }
+    monkeypatch.setattr(eng, "_batch_calc_momentum", lambda codes: stale)
+
+    # 模拟实时行情：返回近期序列，动量随 code 不同且非冻结值
+    class FakeLoader:
+        def get_price(self, code, days=60, adjust="qfq"):
+            n = 62
+            base = {"515790": 1.0, "510500": 2.0}.get(code, 1.5)
+            closes = [base * (1 + 0.001 * i) for i in range(n)]  # 20日动量 ≈ +2.0%
+            return pd.DataFrame({
+                "date": pd.date_range("2026-06-01", periods=n),
+                "close": closes,
+                "amount": [1e8] * n,
+            })
+
+    eng.price_loader = FakeLoader()
+
+    with caplog.at_level(logging.WARNING):
+        res = eng.select_etfs(top_n=8)
+
+    assert not res.empty, "实时回退应至少选出部分 ETF"
+    # 关键断言：不得出现冻结的虚假动量值
+    assert 6.4 not in res["momentum_20d"].values
+    assert 1.1 not in res["momentum_20d"].values
+    # 实时动量应为正（≈2%）而非冻结值
+    assert (res["momentum_20d"] > 0).any()
+    assert any("过期" in r.message for r in caplog.records), "应记录 DB 数据过期告警"
+
+
+def test_select_etfs_skips_when_live_also_fails(monkeypatch, caplog):
+    """当 DB 冻结且实时获取也失败时，应跳过而非输出冻结值。"""
+    import logging
+    cfg = {"data_source": {"cache_dir": "data_cache"}, "output": {}}
+    eng = _engine(monkeypatch, cfg)
+
+    stale = {"515790": {"momentum_20d": 6.4, "momentum_60d": -1.0, "as_of": "2026-03-13"}}
+    monkeypatch.setattr(eng, "_batch_calc_momentum", lambda codes: stale)
+
+    class EmptyLoader:
+        def get_price(self, code, days=60, adjust="qfq"):
+            return pd.DataFrame()  # 实时失败
+
+    eng.price_loader = EmptyLoader()
+
+    with caplog.at_level(logging.WARNING):
+        res = eng.select_etfs(top_n=8)
+
+    assert res.empty, "实时失败时应不输出任何冻结 ETF"
+    assert any("不可用" in r.message for r in caplog.records)
+

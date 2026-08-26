@@ -413,6 +413,7 @@ class MultiFactorEngine:
                         "vol20": vol,                     # 20日实现波动率(低波)
                         "ma20": ma20,
                         "ma60": ma60,
+                        "as_of": points[-1][0],           # 数据最新日期，供新鲜度校验
                     }
                     hit_count += 1
                 else:
@@ -420,6 +421,7 @@ class MultiFactorEngine:
                         "momentum_20d": 0.0, "momentum_60d": 0.0,
                         "rev_chg": 0.0, "vol20": float("nan"),
                         "ma20": float("nan"), "ma60": float("nan"),
+                        "as_of": points[-1][0] if points else None,
                     }
             logger.info(f"批量动量/低波/均线计算: {hit_count}/{len(codes)} 只有效 (daily_price 命中)")
             return results
@@ -927,6 +929,20 @@ class MultiFactorEngine:
     #  ETF 选股
     # ========================================
 
+    # DB 动量数据允许的最大过期天数（日历日）。超过则视为冻结快照，改取实时行情。
+    ETF_MOMENTUM_MAX_AGE_DAYS = 10
+
+    def _is_momentum_fresh(self, as_of: Optional[str], max_age_days: int = None) -> bool:
+        """校验动量数据是否足够新鲜（默认 10 个日历日内，约 7 个交易日）。"""
+        if not as_of:
+            return False
+        try:
+            d = datetime.strptime(as_of, "%Y-%m-%d").date()
+            limit = max_age_days if max_age_days is not None else self.ETF_MOMENTUM_MAX_AGE_DAYS
+            return (datetime.now().date() - d).days <= limit
+        except Exception:
+            return False
+
     def select_etfs(self, top_n: int = 8) -> pd.DataFrame:
         """
         ETF 筛选：从主流行业/宽基 ETF 中按动量+流动性选 Top N。
@@ -970,21 +986,34 @@ class MultiFactorEngine:
         picks = []
         for code, name in well_known_etfs:
             try:
-                # 优先 DB 动量
-                if code in db_momentum:
-                    mom20 = db_momentum[code].get("momentum_20d", 0)
-                    mom60 = db_momentum[code].get("momentum_60d", 0)
+                mom20 = mom60 = None
+                amount = etf_amounts.get(code, 0)
+                rec = db_momentum.get(code)
+                # 优先 DB 动量，但必须校验数据新鲜度（防止冻结快照长期不更新却照常输出）
+                if rec and self._is_momentum_fresh(rec.get("as_of")):
+                    mom20 = rec.get("momentum_20d", 0)
+                    mom60 = rec.get("momentum_60d", 0)
                 else:
-                    # 回退 CLI
+                    # DB 数据缺失或过期 => 回退实时行情(CLI/本地缓存)
+                    if rec and not self._is_momentum_fresh(rec.get("as_of")):
+                        logger.warning(f"ETF {code} DB 动量数据过期(as_of={rec.get('as_of')})，改取实时行情")
                     df = self.price_loader.get_price(code, days=60)
-                    if len(df) < 20:
-                        continue
-                    close = df["close"].values
-                    mom20 = (close[-1] / close[-20] - 1) * 100 if len(close) >= 21 else 0
-                    mom60 = (close[-1] / close[-60] - 1) * 100 if len(close) >= 61 else 0
+                    if len(df) >= 21:
+                        close = df["close"].values
+                        mom20 = (close[-1] / close[-21] - 1) * 100
+                        mom60 = (close[-1] / close[-61] - 1) * 100 if len(close) >= 61 else 0
+                        # 成交额优先用实时近5日均值
+                        if "amount" in df.columns and len(df) >= 5:
+                            amount = float(df["amount"].tail(5).mean())
+
+                # 实时也失败 => 明确标记数据不可用，绝不输出冻结的虚假动量
+                if mom20 is None or not pd.notna(mom20):
+                    logger.warning(f"ETF {code} 动量数据不可用(DB 冻结且实时获取失败)，跳过")
+                    continue
 
                 # 综合评分: 动量(60%) + 流动性(40%)
-                mom_score = (mom20 * 0.6 + (0 if not pd.notna(mom60) else mom60) * 0.4) * 0.6
+                mom60_v = 0 if not pd.notna(mom60) else mom60
+                mom_score = (mom20 * 0.6 + mom60_v * 0.4) * 0.6
                 if not pd.notna(mom_score):
                     mom_score = 0
                 score = mom_score + 20  # 基础分+动量分
@@ -994,10 +1023,11 @@ class MultiFactorEngine:
                     "etf_type": "宽基" if code.startswith(("51","58")) else "行业",
                     "momentum_20d": round(mom20, 2) if pd.notna(mom20) else 0,
                     "momentum_60d": round(mom60, 2) if pd.notna(mom60) else 0,
-                    "amount": etf_amounts.get(code, 0),
+                    "amount": amount,
                     "score": round(score + 50, 1),
                 })
-            except Exception:
+            except Exception as e:
+                logger.warning(f"ETF {code} 处理异常: {e}")
                 continue
 
         result = pd.DataFrame(picks)

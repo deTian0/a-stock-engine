@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETF 早盘推荐冻结 Bug 诊断</title>
+<style>
+  :root{--bg:#f5f7fa;--card:#fff;--ink:#1f2933;--sub:#52606d;--line:#e4e7eb;--red:#c0392b;--green:#2e7d32;--blue:#2563eb;--amber:#b7791f;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.6;}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 20px;}
+  h1{font-size:24px;margin:0 0 4px;} .sub{color:var(--sub);font-size:13px;margin-bottom:24px;}
+  .verdict{background:#fdecea;border:1px solid #f5c6c0;color:var(--red);padding:14px 16px;border-radius:10px;font-weight:600;margin-bottom:24px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:18px;}
+  h2{font-size:18px;margin:0 0 12px;color:var(--blue);}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0;}
+  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;}
+  th{background:#f0f4f8;color:var(--sub);font-weight:600;}
+  code{background:#eef2f7;padding:1px 5px;border-radius:4px;font-size:12px;}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;}
+  .bug{background:#fdecea;color:var(--red);} .fix{background:#e6f4ea;color:var(--green);}
+  ul{margin:8px 0;padding-left:20px;} li{margin:5px 0;}
+  .small{font-size:12px;color:var(--sub);}
+  .kv{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ETF 早盘推荐连续多日完全相同 — 根因诊断</h1>
+  <div class="sub">日期 2026-08-26 · a-stock-engine · 文件：history/ 简报 + market.db</div>
+
+  <div class="verdict">✅ 结论：是 Bug（数据冻结）。ETF 组合 16 天逐字节不变，20 日动量不可能长期恒定。</div>
+
+  <div class="card">
+    <h2>一、证据</h2>
+    <h3 style="font-size:14px;margin:14px 0 6px;">1. 简报 ETF 段落逐日对比</h3>
+    <table>
+      <tr><th>日期</th><th>ETF 组合（前 3 只）</th><th>动量20日</th></tr>
+      <tr><td>08-10</td><td>515790 光伏 / 510500 中证500 / 515050 5G</td><td class="kv">6.4% / 1.1% / 6.2%</td></tr>
+      <tr><td>08-13</td><td>515790 光伏 / 510500 中证500 / 515050 5G</td><td class="kv">6.4% / 1.1% / 6.2%</td></tr>
+      <tr><td>08-19</td><td>515790 光伏 / 510500 中证500 / 515050 5G</td><td class="kv">6.4% / 1.1% / 6.2%</td></tr>
+      <tr><td>08-26</td><td>515790 光伏 / 510500 中证500 / 515050 5G</td><td class="kv">6.4% / 1.1% / 6.2%</td></tr>
+    </table>
+    <p class="small">8 只 ETF 的代码、名称、动量值、排序顺序全部一致，跨越 16 个自然日。</p>
+
+    <h3 style="font-size:14px;margin:14px 0 6px;">2. 对照：股票榜（②A/②B）每天在变</h3>
+    <table>
+      <tr><th>日期</th><th>中长线候选（前 3 只）</th></tr>
+      <tr><td>08-10</td><td class="kv">002223 / 002847 / 002212</td></tr>
+      <tr><td>08-26</td><td class="kv">600809 / 002507 / 601088</td></tr>
+    </table>
+    <p class="small">说明股票管线用新鲜数据，唯独 ETF 管线冻结。</p>
+
+    <h3 style="font-size:14px;margin:14px 0 6px;">3. 数据层定位（market.db.daily_price）</h3>
+    <table>
+      <tr><th>对象</th><th>daily_price 最新日期</th><th>行数</th></tr>
+      <tr><td>515790 光伏ETF</td><td>2026-03-13</td><td>1266</td></tr>
+      <tr><td>510500 中证500ETF</td><td>2026-03-13</td><td>1499</td></tr>
+      <tr><td>512480 半导体ETF</td><td>2026-03-13</td><td>1498</td></tr>
+      <tr><td>000001 平安银行（对照）</td><td>2026-08-14</td><td>1546</td></tr>
+    </table>
+    <p class="small"><code>daily_price</code> 由 <code>import_parquet_prices</code> 从<b>本地静态 parquet</b> 导入，非每日实时刷新。该数据集对 ETF 仅覆盖到 2026-03-13，动量被永久钉死。</p>
+  </div>
+
+  <div class="card">
+    <h2>二、根因</h2>
+    <p><code>select_etfs()</code> 的 ETF 动量取自 <code>_batch_calc_momentum()</code>（读 market.db）：</p>
+    <ul>
+      <li>旧逻辑：只要 <code>code in db_momentum</code> 就<b>直接采用</b> DB 动量，<b>不做新鲜度校验</b>。</li>
+      <li>ETF 在 DB 中<b>存在但已过期</b>（as_of=2026-03-13），因此「回退实时行情」分支（仅当 code 完全缺失时触发）永不生效。</li>
+      <li>结果：每天用同一份冻结快照重算动量 → 同一组值 → 排序后还是同一 8 只 → 简报逐字相同。</li>
+    </ul>
+    <p class="small">本质：引擎信任了「存在即新鲜」的错误假设，对过期数据没有新鲜度闸门。</p>
+  </div>
+
+  <div class="card">
+    <h2>三、修复（已落地 + 单测）</h2>
+    <p><span class="tag fix">FIX</span> 改动 <code>src/multifactor.py</code>：</p>
+    <ul>
+      <li><code>_batch_calc_momentum()</code> 记录新增 <code>as_of</code>（数据最新日期）。</li>
+      <li>新增 <code>_is_momentum_fresh(as_of, max_age_days=10)</code>：超 10 个日历日（≈7 交易日）视为冻结。</li>
+      <li><code>select_etfs()</code>：DB 动量<b>且</b>新鲜才采用；缺失/过期 → 回退 <code>price_loader.get_price()</code> 实时行情；实时也失败 → <b>跳过并记录告警</b>，绝不输出冻结值。</li>
+    </ul>
+    <p>新增单测：<code>test_select_etfs_avoids_stale_db_and_uses_live</code> / <code>test_select_etfs_skips_when_live_also_fails</code>。</p>
+    <p class="kv">pytest tests/test_multifactor.py → 6 passed</p>
+  </div>
+
+  <div class="card">
+    <h2>四、遗留事项（非代码层）</h2>
+    <ul>
+      <li>根因是 <b>ETF 价格源（本地 parquet）长期未更新</b>。代码闸门已能自动改取实时行情（生产依托 westock），但仍建议修复数据管道：让每日任务把 ETF 日线纳入刷新。</li>
+      <li>旁证：600519 茅台、300750 宁德等个股 daily_price 也停在 2026-04-17，建议对全市场做「最新交易日」一致性巡检。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
