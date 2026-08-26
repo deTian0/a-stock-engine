@@ -27,11 +27,15 @@ import pandas as pd
 import numpy as np
 
 
-# 默认评分权重(v4.26: 成长 g 清零 — 营收增速 Rank-IC=-0.030/t=-1.62 弱负且不显著,
-#   属纯噪声/负贡献; 隔离回测 v4.25(+10.14%/夏普0.19) -> v4.26(+28.59%/夏普0.40),
-#   全部指标同向改善。任何权重倾斜(vol/rev 增减)均不如"仅清零成长"的极简改动)
-W_DEFAULT = dict(vol=0.45, rev=0.35, value=0.0, q=0.12, g=0.0)
-W_VALUE = dict(vol=0.38, rev=0.27, value=0.18, q=0.10, g=0.0)
+# 默认评分权重(v4.29 锁定 — 基于 M2 滚动窗口权重再估计 OOS 结论):
+#   - q(质量/低杠杆) 前向 Rank-IC 全期为负(全周期 -0.011); 固定保留 q=0.12 实为拖累。
+#     M2 逐折按 IC 重估后 q 归零, OOS 几何 +35.4% -> +47.9%。故锁定 q=0。
+#   - 真正 alpha 仅低波 + 反转(全周期 IC vol +0.063 / rev +0.065, IC 加权平分≈0.49/0.51);
+#     vol/rev 采用均衡 0.5/0.5(对精确 split 不敏感, OOS 稳健)。
+#   - g(成长)/value 维持 0: 成长 IC≈0 纯噪声; 价值 long-only 集中持仓下净拖累(默认关)。
+#   该权重即 M2「收益率最高」的滚动再估计集的稳定收敛点, 已固定为 canonical 单一事实来源。
+W_DEFAULT = dict(vol=0.5, rev=0.5, value=0.0, q=0.0, g=0.0)
+W_VALUE = dict(vol=0.41, rev=0.41, value=0.18, q=0.0, g=0.0)
 
 
 def factor_scores(df: pd.DataFrame) -> pd.DataFrame:
