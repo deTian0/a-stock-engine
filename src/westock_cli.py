@@ -52,18 +52,13 @@ WESTOCK_CLI_CMD = [get_npx_path(), "-y", "westock-data-skillhub@1.0.5"]
 def _to_ws_code(code: str) -> str:
     """6位代码 → westock sh/sz 前缀格式。
 
-    规则（与主路径 westock_helpers._to_ws 保持一致，修复沪市 ETF 错路由 bug）：
-      沪市: 5/6/9 开头 → sh（含 5xxxx 沪市 ETF，如 510050/515790/512880）
-      深市: 0/1/2/3 开头 → sz（含 1xxxx 深市 ETF，如 159915）
-      北交所: 4/8 开头 → bj
+    **单一事实来源**：直接委托 ``westock_helpers._to_ws``，不再维护第二份
+    路由逻辑。历史上 westock_cli 与 westock_helpers 各有一份，导致 ETF
+    前缀 bug 只修了一处、另一处漏修（见 git 历史 3174c98 / 552a263）。
+    委托后，路由规则只存在于一处，杜绝漂移。
     """
-    code = str(code).zfill(6)
-    if code.startswith(("5", "6", "9")):
-        return f"sh{code}"
-    elif code.startswith(("4", "8")):
-        return f"bj{code}"
-    else:
-        return f"sz{code}"
+    from westock_helpers import _to_ws
+    return _to_ws(code)
 
 
 def _to_index_ws_code(code: str) -> str:

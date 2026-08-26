@@ -65,7 +65,11 @@ def _cls(v) -> str:
 
 
 def _fmt_num(v, nd: int = 2) -> str:
-    """普通数值格式化；0 / None / NaN 显示 '-'。"""
+    """普通数值格式化；仅 None / NaN 显示 '-'，0 正常显示为 0.00（不当缺失）。
+
+    修复：旧实现把 f==0 当缺失显示成 '-'，会误把真实 0 值（如 score=0、
+    vol_ratio=0）渲染成「无数据」，造成读报告时误判。
+    """
     if v is None:
         return "-"
     try:
@@ -73,8 +77,6 @@ def _fmt_num(v, nd: int = 2) -> str:
     except (TypeError, ValueError):
         return "-"
     if f != f:  # NaN
-        return "-"
-    if f == 0:
         return "-"
     return f"{f:.{nd}f}"
 

@@ -64,6 +64,9 @@ def load_picks_from_brief(brief_path: Path) -> list[dict]:
     采用**白名单**：只有章节标题命中 BUY_SECTIONS 才纳入；其余章节
     （当前持仓、观察名单、持仓追踪等）一律排除，避免非买入标的摊薄胜率分母。
     返回每项带 category 标注（来源为 Markdown 时按章节推断）。
+
+    列定位按**表头列名**（而非固定列序）：简报列序一旦调整（如把代码挪到第三列）
+    也不会静默错位 —— cells[1]/cells[2] 硬编码曾是隐患。
     """
     if not brief_path.exists():
         return []
@@ -72,11 +75,20 @@ def load_picks_from_brief(brief_path: Path) -> list[dict]:
     picks = []
     in_buy = False
     current_cat = ""
+    header_cols: dict = None  # 当前表格: 列名 -> 列索引
+
+    def _find_col(header: dict, names: tuple) -> int | None:
+        """优先精确匹配列名，命中第一个返回其索引；无则 None。"""
+        for n in names:
+            if n in header:
+                return header[n]
+        return None
 
     for line in content.split("\n"):
         if line.startswith("## "):
             in_buy = False
             current_cat = ""
+            header_cols = None
             for key, cat in _SECTION_TO_CAT.items():
                 if key in line:
                     in_buy = True
@@ -85,15 +97,26 @@ def load_picks_from_brief(brief_path: Path) -> list[dict]:
             continue
         if not in_buy:
             continue
-        if line.startswith("|") and "---" not in line:
+        if line.startswith("|"):
             cells = [c.strip() for c in line.split("|")]
-            if len(cells) >= 3:
-                code = norm_code(cells[1])
-                name = cells[2]
-                # 6 位数字代码（含 ETF，如 515790）；norm_code 已零填充
-                if code and code.isdigit() and len(code) == 6:
-                    if code not in [p["code"] for p in picks]:
-                        picks.append({"code": code, "name": name, "category": current_cat})
+            if "---" in line:
+                # 分隔行，跳过
+                continue
+            if header_cols is None:
+                # 首个 | 行视为表头，记录 列名->索引（列序无关）
+                header_cols = {c: i for i, c in enumerate(cells)}
+                continue
+            # 数据行：按列名定位代码/名称
+            code_idx = _find_col(header_cols, ("代码",))
+            name_idx = _find_col(header_cols, ("名称", "股票名称", "证券名称"))
+            if code_idx is None or name_idx is None:
+                continue
+            code = norm_code(cells[code_idx]) if code_idx < len(cells) else ""
+            name = cells[name_idx] if name_idx < len(cells) else ""
+            # 6 位数字代码（含 ETF，如 515790）；norm_code 已零填充
+            if code and code.isdigit() and len(code) == 6:
+                if code not in [p["code"] for p in picks]:
+                    picks.append({"code": code, "name": name, "category": current_cat})
 
     return picks
 
@@ -249,7 +272,7 @@ def generate_verification_report(verification_results: list[dict]) -> str:
     lines.append("## 汇总统计（纯推荐买入）\n")
     lines.append(f"- 总买入候选数: {total_picks}")
     lines.append(f"- 成功验证: {success_count}")
-    lines.append(f"- 验证成功率: {success_count/total_picks*100:.1f}%" if total_picks > 0 else "- 验证成功率: N/A")
+    lines.append(f"- 数据齐备率: {success_count/total_picks*100:.1f}%（T+2 价格可获取占比，**非胜率**）" if total_picks > 0 else "- 数据齐备率: N/A")
 
     if all_returns:
         arr = np.array(all_returns)
