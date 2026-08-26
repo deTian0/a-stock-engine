@@ -1,0 +1,7 @@
+[ABL-A] 已应用, 启动回测 -> D:\workspace\github/a-stock-engine\empirical/logs/bt_ablation_A.log
+[ABL-A] 回测结束 rc=0
+[ABL-A] 已 git checkout 还原
+[ABL-B] 已应用, 启动回测 -> D:\workspace\github/a-stock-engine\empirical/logs/bt_ablation_B.log
+[ABL-B] 回测结束 rc=0
+[ABL-B] 已 git checkout 还原
+[ABL] 全部 ablation 完成
