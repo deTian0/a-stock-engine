@@ -18,11 +18,20 @@ _ENCODING = get_encoding()
 
 
 def _to_ws(code: str) -> str:
-    """6位码 → sh/sz前缀。"""
+    """6位码 → sh/sz/bj 前缀（正确处理 ETF/基金代码）。
+
+    沪市: 6xxxxx 股票(60/68/90)、5xxxxx 与 11xxxxx ETF/基金/债券 -> sh
+    深市: 0xxxxx/3xxxxx 股票、1xxxxx ETF/基金(12/13/15/16/18) -> sz
+    北交所: 8xxxxx/4xxxxx -> bj
+
+    修复: 旧实现把 15xxxx/51xxxx 等 ETF 代码错判为 bj(北交所),
+    导致 batch_quotes/batch_kline 对持仓 ETF 取不到实时价(查 bj 前缀无数据),
+    持仓追踪 live 价修复在生产环境静默失效。
+    """
     code = str(code).zfill(6)
-    if code.startswith(("6", "9")):
+    if code.startswith(("6", "9", "5", "11")):
         return f"sh{code}"
-    elif code.startswith(("0", "2", "3")):
+    if code.startswith(("0", "3", "2", "1")):
         return f"sz{code}"
     return f"bj{code}"
 
