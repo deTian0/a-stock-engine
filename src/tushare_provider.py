@@ -441,7 +441,10 @@ class TushareProvider:
         cached = self.db.cache_get(cache_key)
         if cached is not None and len(cached) > 0:
             if "code" in cached.columns and "sector" in cached.columns:
-                return dict(zip(cached["code"], cached["sector"]))
+                # 修复: 缓存经 data.to_json()->pd.read_json() 会把 "000007" 推断成 int 7,
+                # 丢失前导零; 这里统一规范化回 6 位零填充字符串, 否则 afternoon_review
+                # 用 zfill(6) 字符串 map 会全部 miss -> fillna("综合")。
+                return {str(k).zfill(6): v for k, v in zip(cached["code"], cached["sector"])}
             return {}
 
         try:
@@ -454,7 +457,8 @@ class TushareProvider:
 
             basic["code"] = basic["ts_code"].apply(_from_ts_code)
             basic["sector"] = basic["industry"].fillna("综合")
-            result = dict(zip(basic["code"], basic["sector"]))
+            # 规范化 key 为 6 位零填充字符串(与 afternoon_review 的 zfill(6) 对齐)
+            result = {str(k).zfill(6): v for k, v in zip(basic["code"], basic["sector"])}
 
             mapping_df = pd.DataFrame([
                 {"code": k, "sector": v} for k, v in result.items()

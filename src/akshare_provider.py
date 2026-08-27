@@ -218,7 +218,7 @@ class AkshareProvider:
                 return {}
             result = {}
             for _, row in full.iterrows():
-                code = str(row.get("code", ""))
+                code = str(row.get("code", "")).zfill(6)
                 name = str(row.get("name", ""))
                 result[code] = name[:2] if len(name) >= 2 else name
 

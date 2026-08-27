@@ -86,8 +86,23 @@ class StockDB:
         logger.info("初始化数据库表结构...")
 
         c.executescript("""
-        CREATE TABLE IF NOT EXISTS stock_picks (
+        -- 运行头表: 一次选股运行 = 一行 runs, run_id 唯一(PK)
+        -- 修复: 旧 stock_picks 以 run_id 为 PK, 但一次运行多只股票共享同一 run_id,
+        --        executemany 第2行起撞 PK -> IntegrityError -> 整批回滚 -> stock_picks 永为0行。
+        CREATE TABLE IF NOT EXISTS runs (
             run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            date         TEXT    NOT NULL,
+            session_type TEXT    DEFAULT 'pre_market',
+            regime       TEXT,
+            position_cap REAL,
+            l2_filtered  INTEGER,
+            elapsed_sec  REAL,
+            created_at   TEXT    DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_picks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id       INTEGER NOT NULL,
             date         TEXT    NOT NULL,
             code         TEXT    NOT NULL,
             name         TEXT,
@@ -99,7 +114,8 @@ class StockDB:
             l2_filtered  INTEGER,
             elapsed_sec  REAL,
             session_type TEXT    DEFAULT 'pre_market',
-            created_at   TEXT    DEFAULT (datetime('now','localtime'))
+            created_at   TEXT    DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (run_id) REFERENCES runs(run_id)
         );
 
         CREATE TABLE IF NOT EXISTS t2_verifications (
@@ -156,7 +172,7 @@ class StockDB:
             volume_ratio    REAL,
             short_signal    TEXT,
             created_at      TEXT    DEFAULT (datetime('now','localtime')),
-            FOREIGN KEY (run_id) REFERENCES stock_picks(run_id)
+            FOREIGN KEY (run_id) REFERENCES runs(run_id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_stock_picks_date   ON stock_picks(date);
@@ -309,6 +325,131 @@ class StockDB:
 
         logger.info("数据库初始化完成")
 
+        # v4.15: stock_picks 增加 id 自增主键, run_id 降为外键 -> runs 表
+        # (修复根因: 旧 run_id PK 与「一次运行多只股票共享 run_id」冲突致整批回滚)
+        try:
+            self._migrate_stock_picks_schema(c)
+        except Exception as e:
+            logger.error(f"stock_picks 迁移失败(可忽略旧库): {e}")
+
+    def _migrate_stock_picks_schema(self, c) -> None:
+        """v4.15 一次性迁移: 旧 stock_picks(run_id 为 PK) -> 新 schema(id 自增 PK + run_id FK->runs)。
+
+        旧 schema 下 stock_picks 以 run_id 为 PRIMARY KEY, 但一次运行的多只股票共享同一 run_id,
+        executemany 第二行起撞 PK -> IntegrityError -> 整批回滚 -> stock_picks 永为 0 行。
+        新 schema: runs(run_id PK) + stock_picks(id PK, run_id FK) + factor_scores(run_id FK->runs)。
+        """
+        cols = [r[1] for r in c.execute("PRAGMA table_info(stock_picks)").fetchall()]
+        if "id" in cols:
+            return  # 已是新 schema, 无需迁移
+
+        c.execute("PRAGMA foreign_keys=OFF")
+        try:
+            # 1) 重建 stock_picks + runs, 迁移旧数据(若有)
+            c.execute("ALTER TABLE stock_picks RENAME TO stock_picks_old")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date         TEXT    NOT NULL,
+                    session_type TEXT    DEFAULT 'pre_market',
+                    regime       TEXT,
+                    position_cap REAL,
+                    l2_filtered  INTEGER,
+                    elapsed_sec  REAL,
+                    created_at   TEXT    DEFAULT (datetime('now','localtime'))
+                )
+            """)
+            c.execute("""
+                CREATE TABLE stock_picks (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id       INTEGER NOT NULL,
+                    date         TEXT    NOT NULL,
+                    code         TEXT    NOT NULL,
+                    name         TEXT,
+                    category     TEXT    NOT NULL,
+                    composite_score REAL,
+                    sector       TEXT,
+                    regime       TEXT,
+                    position_cap REAL,
+                    l2_filtered  INTEGER,
+                    elapsed_sec  REAL,
+                    session_type TEXT    DEFAULT 'pre_market',
+                    created_at   TEXT    DEFAULT (datetime('now','localtime')),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+            """)
+            old_rows = c.execute(
+                "SELECT run_id, date, code, name, category, composite_score, sector, "
+                "regime, position_cap, l2_filtered, elapsed_sec, session_type "
+                "FROM stock_picks_old"
+            ).fetchall()
+            if old_rows:
+                for rid in sorted({r[0] for r in old_rows}):
+                    sample = next(r for r in old_rows if r[0] == rid)
+                    cur = c.execute(
+                        "INSERT INTO runs(date, session_type, regime, position_cap, "
+                        "l2_filtered, elapsed_sec) VALUES (?,?,?,?,?,?)",
+                        (sample[1], sample[11] or "pre_market", sample[7],
+                         sample[8], sample[9], sample[10]),
+                    )
+                    new_rid = cur.lastrowid
+                    for r in old_rows:
+                        if r[0] == rid:
+                            c.execute(
+                                "INSERT INTO stock_picks(run_id, date, code, name, category, "
+                                "composite_score, sector, regime, position_cap, l2_filtered, "
+                                "elapsed_sec, session_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (new_rid, r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                                 r[8], r[9], r[10], r[11]),
+                            )
+            c.execute("DROP TABLE stock_picks_old")
+
+            # 2) factor_scores FK: stock_picks(run_id) -> runs(run_id)
+            c.execute("ALTER TABLE factor_scores RENAME TO factor_scores_old")
+            c.execute("""
+                CREATE TABLE factor_scores (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id          INTEGER NOT NULL,
+                    code            TEXT    NOT NULL,
+                    name            TEXT,
+                    composite_score REAL,
+                    pe              REAL,
+                    pb              REAL,
+                    roe             REAL,
+                    gross_margin    REAL,
+                    debt_ratio      REAL,
+                    revenue_growth  REAL,
+                    profit_growth   REAL,
+                    momentum_20d    REAL,
+                    momentum_60d    REAL,
+                    market_cap      REAL,
+                    sector          TEXT,
+                    rsi             REAL,
+                    kdj_k           REAL,
+                    kdj_d           REAL,
+                    kdj_j           REAL,
+                    ma5_slope       REAL,
+                    ma10_slope      REAL,
+                    volume_ratio    REAL,
+                    short_signal    TEXT,
+                    created_at      TEXT    DEFAULT (datetime('now','localtime')),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+            """)
+            fcols = [x[1] for x in c.execute("PRAGMA table_info(factor_scores_old)").fetchall()]
+            old_f = c.execute(f"SELECT {','.join(fcols)} FROM factor_scores_old").fetchall()
+            if old_f:
+                ph = ",".join("?" * len(fcols))
+                c.executemany(
+                    f"INSERT INTO factor_scores({','.join(fcols)}) VALUES ({ph})", old_f
+                )
+            c.execute("DROP TABLE factor_scores_old")
+
+            # 3) 为旧 factor_scores 的孤立 run_id 补 runs 行(若 FK 校验开启后需要)
+            c.commit()
+        finally:
+            c.execute("PRAGMA foreign_keys=ON")
+
     # ============================================
     #  写入方法
     # ============================================
@@ -327,7 +468,17 @@ class StockDB:
         today = datetime.now().strftime("%Y-%m-%d")
         c = self.conn
 
-        run_id = c.execute("SELECT COALESCE(MAX(run_id), 0) + 1 FROM stock_picks").fetchone()[0]
+        # 1) 先写 runs 表, 取本次运行的 run_id (自增唯一)。
+        #    修复: 旧逻辑用 SELECT MAX(run_id)+1 算号并直接当 stock_picks 的 PK,
+        #          但一次运行的多只股票共享同一 run_id -> executemany 第二行起撞 PK
+        #          -> 整批回滚。现在 run_id 来自 runs 表, stock_picks 用独立 id 自增主键。
+        cur = c.execute(
+            "INSERT INTO runs(date, session_type, regime, position_cap, "
+            "l2_filtered, elapsed_sec) VALUES (?,?,?,?,?,?)",
+            (today, session_type, regime_name, cap,
+             results.get("l2_filtered_count", 0), results.get("elapsed_seconds", 0)),
+        )
+        run_id = cur.lastrowid
 
         rows = []
         for cat_name, cat_df in categories.items():

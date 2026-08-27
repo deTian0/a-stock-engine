@@ -83,3 +83,34 @@ def test_sector_of_with_mapping_no_network():
     mapping = {"600519": "白酒", "000001": "银行"}
     assert westock_cli.sector_of("600519", mapping) == "白酒"
     assert westock_cli.sector_of("999999", mapping) == "未知"
+
+
+def test_sector_mapping_normalizes_cached_int_keys(monkeypatch):
+    """缓存经 data.to_json()->pd.read_json() 会把 '000001' 推断成 int 1,
+    丢失前导零; 读回应规范回 6 位零填充字符串, 否则 afternoon_review 用
+    zfill(6) 字符串 map 会全部 miss -> fillna('综合') 退化成单一大类。"""
+    import pandas as pd
+    from tushare_provider import TushareProvider
+
+    # 模拟脏缓存: code 列被存成 int (1 / 300750 / 600519)
+    bad = pd.DataFrame({
+        "code": [1, 300750, 600519],
+        "sector": ["银行", "电气设备", "白酒"],
+    })
+
+    class FakeDB:
+        def cache_get(self, key):
+            return bad
+
+        def cache_put(self, *a, **k):
+            pass
+
+    # db 是只读 property -> get_db(); 通过 monkeypatch get_db 注入 FakeDB
+    import tushare_provider
+    monkeypatch.setattr(tushare_provider, "get_db", lambda: FakeDB())
+
+    prov = TushareProvider()
+    m = prov.get_sector_mapping()
+    assert m == {"000001": "银行", "300750": "电气设备", "600519": "白酒"}, m
+    assert all(isinstance(k, str) and len(k) == 6 and k.isdigit() for k in m)
+
