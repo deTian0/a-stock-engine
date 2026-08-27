@@ -234,7 +234,7 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
                     for p in cat_picks[:10]:
                         code = p.get("code", "")
                         name = p.get("name", code)
-                        score = p.get("composite_score", 0)
+                        score = p.get("composite_score")
 
                         # 从实时数据中获取今日表现
                         t0_perf = "-"
@@ -246,9 +246,12 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
                                 t0_perf = f"{today_chg:+.1f}%" if pd.notna(today_chg) else "-"
                                 if pd.notna(today_chg):
                                     advice = "✅ 符合预期" if today_chg > 0 else "⚠️ 暂时偏弱"
-                        lines.append(f"| {code} | {name} | {score:.0f} | {t0_perf} | {advice} |")
+                        # composite_score 可能为 NULL（如 ETF 行），避免 None 格式化崩溃
+                        score_s = f"{score:.0f}" if score is not None else "-"
+                        lines.append(f"| {code} | {name} | {score_s} | {t0_perf} | {advice} |")
                         cat_rows.append({
-                            "code": code, "name": name, "score": float(score),
+                            "code": code, "name": name,
+                            "score": float(score) if score is not None else None,
                             "t0": t0_perf, "advice": advice,
                         })
                     t0_data["by_cat"][cat] = cat_rows

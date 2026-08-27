@@ -71,3 +71,47 @@ def test_generate_review_html_minimal():
     assert "<!DOCTYPE html>" in html
     assert "盘后复盘报告" in html
     assert "光伏" in html
+
+
+def test_review_sectors_t0_verify_handles_null_score(monkeypatch):
+    """第三节早盘验证：composite_score 为 NULL（如 ETF 行）时不应崩溃。
+
+    回归测试：修复前 `score:.0f` 对 None 抛 TypeError 被 except 吞掉，
+    导致整节「早盘推荐当日表现」静默为空。
+    """
+    fake_picks = [
+        {"code": "601965", "name": "中国汽研", "category": "②A_质量榜", "composite_score": 94.8},
+        {"code": "515050", "name": "5GETF", "category": "ETF组合", "composite_score": None},
+    ]
+
+    class FakeDB:
+        def get_latest_run(self):
+            return {"run_id": 1, "date": "2026-08-27"}
+
+        def get_run_detail(self, run_id):
+            return {"picks": fake_picks, "factors": []}
+
+        @property
+        def conn(self):
+            raise RuntimeError("conn 不应在 section 三被用到（已由 except 捕获）")
+
+    class FakeCLI:
+        def get_sector_mapping(self, codes=None):
+            return {}
+
+    monkeypatch.setattr(ar, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(ar, "get_cli", lambda: FakeCLI())
+    # 五/六节 pick_tracker 调用打桩，避免触碰真实 DB
+    monkeypatch.setattr(ar, "get_tracking_summary", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(ar, "get_tracking_report", lambda *a, **k: "")
+
+    # all_stocks 为空 -> 一/二节走「板块数据暂不可用」分支，聚焦验证第三节
+    content, data = ar.review_sectors(FakeCLI(), None, pd.DataFrame(), {}, {})
+
+    assert data.get("t0_verify") is not None
+    total = sum(len(v) for v in data["t0_verify"]["by_cat"].values())
+    assert total == 2, f"应汇总 2 只选股, 实际 {total}"
+    # None 评分的 ETF 行应安全渲染为 '-'，而非让整节崩溃
+    assert "中国汽研" in content
+    assert "5GETF" in content
+    assert "T+0验证失败" not in content
