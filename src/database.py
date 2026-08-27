@@ -921,6 +921,25 @@ class StockDB:
         c.commit()
         return len(rows)
 
+    def delete_prices_for_codes(self, codes: list[str]) -> int:
+        """删除指定 code 的全部日线（含纯码 / .SZ / .SH 三种形态）。
+
+        用于刷新场景：先清掉冻结的旧快照，再 upsert 当日新鲜数据，
+        避免 _batch_calc_momentum 把跨月旧行与当日新行合并成带巨大时间
+        缺口的序列，导致动量/反转指标失真。
+        """
+        if not codes:
+            return 0
+        patterns = []
+        for c in codes:
+            patterns.extend([c, f"{c}.SZ", f"{c}.SH"])
+        placeholders = ",".join("?" for _ in patterns)
+        cur = self.conn.execute(
+            f"DELETE FROM daily_price WHERE code IN ({placeholders})", patterns
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     # ============================================
     #  持久化基本面表（v4 新增）
     # ============================================

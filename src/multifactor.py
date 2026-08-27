@@ -40,6 +40,93 @@ from local_price_loader import LocalPriceLoader
 from database import get_db, get_market_db
 from enrich_short import enrich
 
+
+# ============================================================
+#  早盘 ETF 推荐池（主流宽基 + 行业 ETF）
+#  同时被 select_etfs() 与每日数据刷新管线复用，确保二者一致。
+# ============================================================
+WELL_KNOWN_ETFS = [
+    ("510050", "上证50ETF"), ("510300", "沪深300ETF"),
+    ("510500", "中证500ETF"), ("159915", "创业板ETF"),
+    ("588000", "科创50ETF"), ("512880", "证券ETF"),
+    ("512100", "中证1000ETF"), ("159845", "中证1000"),
+    ("512690", "酒ETF"), ("515790", "光伏ETF"),
+    ("159995", "芯片ETF"), ("512480", "半导体ETF"),
+    ("515050", "5GETF"), ("516510", "云计算ETF"),
+]
+
+
+def _etf_exchange_suffix(code: str) -> str:
+    """ETF 交易所后缀：5/6 开头 -> 上交所(.SH)，其余(1/0/3) -> 深交所(.SZ)。"""
+    return "SH" if code.startswith(("5", "6")) else "SZ"
+
+
+def refresh_etf_daily_prices(price_loader=None, days: int = 65) -> dict:
+    """每日把主流 ETF 的当日日线纳入 daily_price 刷新（修复 ETF 推荐长期冻结）。
+
+    流程（稳健：逐只「取数成功才删旧+写新」，网络抖动不丢数据）：
+      1) 逐只拉取当日实时 K 线；成功者收集行 + 记入 ok_codes。
+      2) 仅对成功取数的 code，delete_prices_for_codes 清掉其 03-13 等冻结旧快照
+         （含纯码/.SZ/.SH 三种形态），避免 _batch_calc_momentum 把跨月旧行与
+         当日新行合并成带巨大时间缺口的序列；随后用正确 .SH/.SZ 后缀 upsert 新数据。
+      3) 取数失败的 ETF 保留旧行（由 select_etfs 新鲜度闸门标记过期并回退实时），
+         绝不因单次网络失败把全部 ETF 清空。
+
+    price_loader 为 None 时自动构造 LocalPriceLoader（优先本地缓存，失效回退 CLI）。
+
+    返回 {refreshed: int, failed: list[str]} 供调用方日志/告警。
+    """
+    from database import get_market_db
+
+    if price_loader is None:
+        price_loader = LocalPriceLoader()
+    mdb = get_market_db()
+    deleted = 0
+    codes = [c for c, _ in WELL_KNOWN_ETFS]
+    refreshed = 0
+    failed = []
+    ok_codes = []
+    rows_to_insert = []
+    for code in codes:
+        try:
+            df = price_loader.get_price(code, days=days)
+            if df is None or len(df) < 20 or "close" not in df.columns:
+                logger.warning(f"ETF {code} 取数不足(行数={len(df) if df is not None else 0})，保留旧行")
+                failed.append(code)
+                continue
+            sfx = _etf_exchange_suffix(code)
+            for _, r in df.iterrows():
+                date = str(r.get("date", ""))[:10]
+                if not date:
+                    continue
+                rows_to_insert.append((
+                    f"{code}.{sfx}", date,
+                    float(r.get("close", 0)),
+                    float(r.get("change_pct", 0)) if pd.notna(r.get("change_pct")) else 0,
+                    float(r.get("volume", 0)) if pd.notna(r.get("volume")) else 0,
+                    float(r.get("amount", 0)) if pd.notna(r.get("amount")) else 0,
+                ))
+            ok_codes.append(code)
+            refreshed += 1
+        except Exception as e:
+            logger.warning(f"ETF {code} 日线刷新失败(保留旧行): {e}")
+            failed.append(code)
+
+    # 仅对成功取数的 code 执行「删旧 + 写新」，避免清空白失败项
+    if ok_codes and rows_to_insert:
+        try:
+            deleted = mdb.delete_prices_for_codes(ok_codes)
+        except Exception as e:
+            logger.warning(f"ETF 旧日线删除失败: {e}")
+            deleted = 0
+        try:
+            mdb.bulk_insert_prices(rows_to_insert)
+        except Exception as e:
+            logger.error(f"ETF 日线写库失败(已删旧行，需重试): {e}")
+            failed.extend(ok_codes)
+    logger.info(f"ETF 日线刷新完成: 成功={refreshed}/{len(codes)} 清旧行={deleted} 失败={failed}")
+    return {"refreshed": refreshed, "failed": failed}
+
 logger = logging.getLogger(__name__)
 
 # 线程池关闭标志（信号安全）
@@ -948,24 +1035,21 @@ class MultiFactorEngine:
         ETF 筛选：从主流行业/宽基 ETF 中按动量+流动性选 Top N。
         优先 DB 批量查询，回退 CLI。
         """
-        well_known_etfs = [
-            ("510050", "上证50ETF"), ("510300", "沪深300ETF"),
-            ("510500", "中证500ETF"), ("159915", "创业板ETF"),
-            ("588000", "科创50ETF"), ("512880", "证券ETF"),
-            ("512100", "中证1000ETF"), ("159845", "中证1000"),
-            ("512690", "酒ETF"), ("515790", "光伏ETF"),
-            ("159995", "芯片ETF"), ("512480", "半导体ETF"),
-            ("515050", "5GETF"), ("516510", "云计算ETF"),
-        ]
+        # 复用模块级常量（与每日 ETF 日线刷新管线一致）
+        well_known_etfs = WELL_KNOWN_ETFS
 
         # 批量从 DB 获取 ETF 动量 + 成交额
         codes_only = [c for c, _ in well_known_etfs]
         db_momentum = self._batch_calc_momentum(codes_only)
-        # 从 daily_price 取最近5日均成交额
+        # 从 daily_price 取最近5日均成交额（兼容 .SZ/.SH/纯码 三种形态）
         etf_amounts = {}
         try:
             mdb = get_market_db()
-            batch_codes = [f"{c}.SZ" for c in codes_only] + [f"{c}.SH" for c in codes_only]
+            batch_codes = (
+                [c for c in codes_only]
+                + [f"{c}.SZ" for c in codes_only]
+                + [f"{c}.SH" for c in codes_only]
+            )
             placeholders = ",".join("?" for _ in batch_codes)
             rows = mdb.conn.execute(f"""
                 SELECT code, amount FROM daily_price

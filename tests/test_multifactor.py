@@ -175,3 +175,126 @@ def test_select_etfs_skips_when_live_also_fails(monkeypatch, caplog):
     assert res.empty, "实时失败时应不输出任何冻结 ETF"
     assert any("不可用" in r.message for r in caplog.records)
 
+
+
+import sqlite3
+import database as dbmod
+import logging
+
+
+class _MemStockDB(dbmod.StockDB):
+    """用内存连接覆盖只读 conn property，测试真实 delete SQL。"""
+    def __init__(self, con):
+        self._con = con
+
+    @property
+    def conn(self):
+        return self._con
+
+
+def _memory_market_db():
+    """构造一个仅含 daily_price 的内存 StockDB，用于测试真实 SQL。"""
+    con = sqlite3.connect(":memory:")
+    con.execute(
+        "CREATE TABLE daily_price ("
+        "code TEXT NOT NULL, date TEXT NOT NULL, close REAL, pct_chg REAL, "
+        "vol REAL, amount REAL, PRIMARY KEY(code,date))"
+    )
+    return _MemStockDB(con)
+
+
+def test_delete_prices_for_codes_removes_all_forms():
+    mdb = _memory_market_db()
+    con = mdb.conn
+    con.executemany(
+        "INSERT INTO daily_price VALUES (?,?,?,?,?,?)",
+        [
+            ("510500", "2026-03-13", 1.0, 0, 0, 0),
+            ("510500.SH", "2026-03-13", 1.0, 0, 0, 0),
+            ("510500.SZ", "2026-03-13", 1.0, 0, 0, 0),
+            ("159915", "2026-03-13", 1.0, 0, 0, 0),
+            ("000001.SZ", "2026-08-20", 2.0, 0, 0, 0),  # 无关股票，不应被删
+        ],
+    )
+    n = mdb.delete_prices_for_codes(["510500", "159915"])
+    remaining = {r[0] for r in con.execute("SELECT code FROM daily_price")}
+    assert remaining == {"000001.SZ"}, remaining
+    assert n == 4
+
+
+def test_refresh_etf_daily_prices_deletes_old_and_upserts_with_suffix(monkeypatch):
+    deleted = []
+    inserted = []
+
+    class FakeMdb:
+        def delete_prices_for_codes(self, codes):
+            deleted.extend(codes)
+            return len(codes) * 3
+
+        def bulk_insert_prices(self, rows):
+            inserted.extend(rows)
+            return len(rows)
+
+    monkeypatch.setattr(dbmod, "get_market_db", lambda *a, **k: FakeMdb())
+
+    dates = pd.date_range("2026-08-01", periods=65).strftime("%Y-%m-%d").tolist()
+
+    class FakeLoader:
+        def get_price(self, code, days=65, adjust="qfq"):
+            return pd.DataFrame(
+                {
+                    "date": dates,
+                    "close": [1.0 + i * 0.01 for i in range(65)],
+                    "change_pct": [0.1] * 65,
+                    "volume": [1000.0] * 65,
+                    "amount": [1e6] * 65,
+                }
+            )
+
+    res = mf.refresh_etf_daily_prices(FakeLoader(), days=65)
+    codes = [c for c, _ in mf.WELL_KNOWN_ETFS]
+    assert res["refreshed"] == len(codes)
+    assert res["failed"] == []
+    # 刷新以纯码列表传入删除（.SZ/.SH 三态展开在 delete_prices_for_codes 内部，由 test 1 覆盖）
+    assert set(deleted) == set(codes)
+    # 写入使用正确交易所后缀，且均为带后缀形态（杜绝新旧行合并）
+    ins_codes = {r[0] for r in inserted}
+    for c in codes:
+        sfx = "SH" if c.startswith(("5", "6")) else "SZ"
+        assert f"{c}.{sfx}" in ins_codes, (c, sfx, ins_codes)
+    assert all("." in r[0] for r in inserted), "不应写入纯码形态"
+
+
+def test_refresh_etf_daily_prices_records_failed(monkeypatch):
+    deleted = []
+    inserted = []
+
+    class FakeMdb:
+        def delete_prices_for_codes(self, codes):
+            deleted.extend(codes)
+            return 0
+
+        def bulk_insert_prices(self, rows):
+            inserted.extend(rows)
+            return len(rows)
+
+    monkeypatch.setattr(dbmod, "get_market_db", lambda *a, **k: FakeMdb())
+
+    class FlakyLoader:
+        def get_price(self, code, days=65, adjust="qfq"):
+            if code == "515790":
+                return pd.DataFrame()  # 模拟该 ETF 拉取失败
+            dates = pd.date_range("2026-08-01", periods=65).strftime("%Y-%m-%d").tolist()
+            return pd.DataFrame(
+                {
+                    "date": dates,
+                    "close": [1.0] * 65,
+                    "change_pct": [0.0] * 65,
+                    "volume": [1.0] * 65,
+                    "amount": [1.0] * 65,
+                }
+            )
+
+    res = mf.refresh_etf_daily_prices(FlakyLoader(), days=65)
+    assert res["failed"] == ["515790"], res
+    assert res["refreshed"] == len(mf.WELL_KNOWN_ETFS) - 1

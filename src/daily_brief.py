@@ -577,6 +577,17 @@ def main():
             logger.info(detail)
 
         engine = MultiFactorEngine(config_dict=config)
+
+        # 早盘自包含刷新 ETF 日线（修复 ETF 推荐长期冻结），
+        # 不依赖前一日下午复盘的写入。
+        try:
+            from multifactor import refresh_etf_daily_prices
+            etf_res = refresh_etf_daily_prices(engine.price_loader, days=65)
+            if etf_res.get("failed"):
+                logger.warning(f"ETF 日线刷新存在失败项: {etf_res['failed']}")
+        except Exception as e:
+            logger.error(f"ETF 日线刷新异常: {e}", exc_info=True)
+
         results = engine.run(session_type=args.session)
 
         if "error" in results:

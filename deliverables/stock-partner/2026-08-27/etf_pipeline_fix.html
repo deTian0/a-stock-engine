@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETF 日线数据管道修复报告 — 2026-08-27</title>
+<style>
+  :root{ --bg:#f6f8fa; --card:#fff; --ink:#1f2933; --sub:#52606d; --line:#e4e7eb;
+         --ok:#0a7d3c; --okbg:#e6f4ea; --warn:#b4540a; --warnbg:#fdf2e6; --accent:#2563eb; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--ink);line-height:1.6;}
+  .wrap{max-width:920px;margin:0 auto;padding:28px 20px 60px;}
+  h1{font-size:25px;margin:0 0 4px;}
+  .meta{color:var(--sub);font-size:13px;margin-bottom:22px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0;
+        box-shadow:0 1px 3px rgba(15,23,42,.04);}
+  h2{font-size:18px;margin:0 0 12px;padding-left:10px;border-left:4px solid var(--accent);}
+  h3{font-size:15px;margin:18px 0 8px;color:var(--sub);}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0;}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;}
+  th{background:#f0f4f8;font-weight:600;}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  code{background:#eef2f6;padding:1px 6px;border-radius:5px;font-size:13px;}
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;}
+  .pill.ok{background:var(--okbg);color:var(--ok);}
+  .pill.warn{background:var(--warnbg);color:var(--warn);}
+  .before{color:var(--warn);font-weight:600;}
+  .after{color:var(--ok);font-weight:600;}
+  ul{margin:8px 0;padding-left:20px;} li{margin:4px 0;}
+  .kv{font-size:14px;}
+  .kv b{color:var(--sub);}
+  .foot{color:var(--sub);font-size:12px;margin-top:24px;text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ETF 日线数据管道修复报告</h1>
+  <div class="meta">a-stock-engine · 分支 exp/lowvol_reversal · 2026-08-27</div>
+
+  <div class="card">
+    <h2>一、问题</h2>
+    <p>早盘「ETF 推荐」连续多天<strong>逐字节相同</strong>：同一 8 只 ETF、同一组动量值（如 6.4% / -3.0%），
+       20 日动量不可能 16 天纹丝不动。这是真 bug，非显示问题。</p>
+  </div>
+
+  <div class="card">
+    <h2>二、根因（数据管道层）</h2>
+    <p><code>market.db.daily_price</code> 中 <strong>ETF 数据冻结在 2026-03-13</strong>，同期股票已更新到 08 月。
+       唯一会刷新 <code>daily_price</code> 的每日任务 <code>afternoon_review.main()</code> 里的
+       <code>_batch_preload_prices</code> 存在三处断点：</p>
+    <table>
+      <tr><th>#</th><th>断点</th><th>后果</th></tr>
+      <tr><td>1</td><td>刷新 universe 仅来自 <code>get_stock_list()</code>（股票池），不含 ETF</td><td>ETF 不在待刷新列表</td></tr>
+      <tr><td>2</td><td>只对<strong>缺失 code</strong> 补全；已存在的冻结 ETF 被跳过</td><td>03-13 旧行永远留着</td></tr>
+      <tr><td>3</td><td>后缀逻辑把 ETF 错标 <code>.BJ</code></td><td>即使回退也写错 code</td></tr>
+    </table>
+    <p><code>daily_brief</code>（早盘）自己从不刷新，完全依赖前一日下午写入 → ETF 持续陈旧。</p>
+  </div>
+
+  <div class="card">
+    <h2>三、修复方案</h2>
+    <ul>
+      <li><strong>database.py</strong> 新增 <code>delete_prices_for_codes()</code>：按 纯码 / <code>.SZ</code> / <code>.SH</code> 三态清空日线，避免新旧行合并。</li>
+      <li><strong>multifactor.py</strong> 抽出 <code>WELL_KNOWN_ETFS</code> 常量 + 新增 <code>refresh_etf_daily_prices()</code>：
+        逐只拉实时 K 线，<strong>取数成功才删旧+写新</strong>（网络抖动不丢数据），用正确 <code>.SH</code>/<code>.SZ</code> 后缀 upsert。</li>
+      <li>接线到两个每日任务：<code>afternoon_review.main()</code> 与 <code>daily_brief.main()</code>。</li>
+      <li><code>select_etfs</code> 复用常量，成交额查询兼容纯码形态（防御性）。</li>
+    </ul>
+    <p class="kv"><b>配套防御层（上一轮已落地）：</b><code>select_etfs</code> 已加 <code>as_of</code> 新鲜度闸门 + 实时回退，
+       刷新偶发失败也不会再输出冻结假值。</p>
+  </div>
+
+  <div class="card">
+    <h2>四、验证证据</h2>
+    <p class="kv"><b>真实刷新一次：</b><span class="pill ok">refreshed 14 / failed 0</span>
+       清掉冻结旧行 <b>19,915</b> 行，重新写入 14 只 ETF。</p>
+    <p class="kv"><b>daily_price ETF 最新日期：</b>
+       <span class="before">2026-03-13</span> → <span class="after">2026-08-27</span></p>
+
+    <h3>早盘 ETF 推荐已解冻（数据日期 2026-08-27）</h3>
+    <table>
+      <tr><th>code</th><th>name</th><th class="num">动量20日</th><th class="num">动量60日</th></tr>
+      <tr><td>512480</td><td>半导体ETF</td><td class="num">9.79%</td><td class="num">-2.41%</td></tr>
+      <tr><td>515050</td><td>5GETF</td><td class="num">18.86%</td><td class="num">-17.64%</td></tr>
+      <tr><td>159845</td><td>中证1000</td><td class="num">11.64%</td><td class="num">-7.93%</td></tr>
+      <tr><td>512100</td><td>中证1000ETF</td><td class="num">11.46%</td><td class="num">-7.94%</td></tr>
+      <tr><td>510500</td><td>中证500ETF</td><td class="num">8.13%</td><td class="num">-4.49%</td></tr>
+      <tr><td>588000</td><td>科创50ETF</td><td class="num">6.29%</td><td class="num">-2.47%</td></tr>
+      <tr><td>159995</td><td>芯片ETF</td><td class="num">8.33%</td><td class="num">-5.65%</td></tr>
+      <tr><td>512880</td><td>证券ETF</td><td class="num">-0.54%</td><td class="num">6.15%</td></tr>
+    </table>
+    <p class="kv">修复前这些数值恒为 <span class="before">6.4% / -3.0%</span> 等冻结假值，逐日相同。</p>
+
+    <p class="kv"><b>单测：</b><span class="pill ok">全量 161 passed</span>，新增 3 例覆盖真实 SQL 删三态 / 刷新串联后缀 / 失败项记录，无回归。</p>
+  </div>
+
+  <div class="card">
+    <h2>五、影响与后续</h2>
+    <ul>
+      <li>改动：<code>database.py</code> / <code>multifactor.py</code> / <code>afternoon_review.py</code> / <code>daily_brief.py</code> / <code>tests/test_multifactor.py</code>。</li>
+      <li>每日早晚两次任务均会刷新 14 只主流 ETF 日线；ETF 推荐自此随真实行情每日变化。</li>
+      <li>取数完全失败时单只 ETF 保留旧行（新鲜度闸门回退实时），<strong>不会清空数据</strong>。</li>
+      <li>后续：将 <code>WELL_KNOWN_ETFS</code> 与 <code>config.yaml</code> 打通支持自定义池；监控 <code>failed</code> 列表连续失败告警。</li>
+    </ul>
+  </div>
+
+  <div class="foot">Generated 2026-08-27 · a-stock-engine ETF pipeline fix</div>
+</div>
+</body>
+</html>

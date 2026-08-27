@@ -983,6 +983,15 @@ def main():
             codes_for_prices = all_stocks.nlargest(300, "change_pct")["code"].tolist() if "change_pct" in all_stocks.columns else all_stocks["code"].head(300).tolist()
         preloaded_prices = _batch_preload_prices(codes_for_prices, config, price_loader)
 
+        # 每日把 ETF 日线纳入刷新（修复早盘 ETF 推荐长期冻结的问题）
+        try:
+            from multifactor import refresh_etf_daily_prices
+            etf_res = refresh_etf_daily_prices(price_loader, days=65)
+            if etf_res.get("failed"):
+                logger.warning(f"ETF 日线刷新存在失败项: {etf_res['failed']}")
+        except Exception as e:
+            logger.error(f"ETF 日线刷新异常: {e}", exc_info=True)
+
         content, review_data = review_sectors(cli, price_loader, all_stocks, preloaded_prices, config)
 
         # 保存 Markdown（按日期分目录；带分钟时间戳归档 + 固定名指针双写）
