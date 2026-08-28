@@ -103,6 +103,11 @@ tr:hover{{background:#f5f7fa}}
 .tag-red{{background:#fef0f0;color:#f56c6c}}
 .tag-yellow{{background:#fdf6ec;color:#e6a23c}}
 .footer{{text-align:center;color:#999;font-size:12px;padding:16px}}
+.codes-block{{margin:10px 0 14px;padding:10px 12px;background:#f7f9fc;border:1px solid #e3e8f0;border-radius:8px}}
+.codes-label{{font-size:13px;color:#1f2d3d;margin-bottom:6px}}
+.codes-text{{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:14px;line-height:1.6;white-space:pre-wrap;margin:0 0 8px;color:#0a4d8c}}
+.copy-btn{{background:#1677ff;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer}}
+.copy-btn:hover{{background:#0958d9}}
 </style>
 </head>
 <body>
