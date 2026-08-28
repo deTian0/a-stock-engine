@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 _QUOTE_COLS = ["change_pct", "close", "amount", "volume", "volume_ratio", "amplitude"]
 
 
+def _strip_tracking_heading(md: str) -> str:
+    """去掉选股命中追踪明细自带的首行标题（## 选股命中追踪），避免与章节标题重复。"""
+    if not md:
+        return md
+    lines = md.splitlines()
+    if lines and lines[0].lstrip().startswith("## 选股命中追踪"):
+        return "\n".join(lines[1:]).strip()
+    return md
+
+
 def _inject_westock_quotes(df: pd.DataFrame) -> pd.DataFrame:
     """注入 westock-data 实时行情（tushare/新浪回退列表可能缺 change_pct/close/amount）。
 
@@ -362,6 +372,8 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
     try:
         lines.append("\n## 六、选股命中追踪\n")
         tracking = get_tracking_report()
+        # 去掉追踪明细自带的首行标题，避免与本节章节标题重复
+        tracking = _strip_tracking_heading(tracking)
         lines.append(tracking)
         data["tracking_md"] = tracking
     except Exception as e:
