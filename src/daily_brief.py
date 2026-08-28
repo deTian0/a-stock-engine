@@ -66,9 +66,15 @@ def generate_brief(results: dict, config: dict) -> str:
     def _codes_block(codes, per_line: int = 5) -> str:
         """生成可直接复制到同花顺自选的代码块。每行最多 per_line 个（6位代码空格分隔）。
 
+        入参 codes 可为本节 DataFrame（自动安全提取 'code' 列）或代码列表。
         返回 blockquote 形式的多行文本（每行一个 '> '），无代码时返回空串。
         """
-        norm = [str(c).zfill(6) for c in codes if c]
+        # DataFrame -> 安全提取 code 列 (空 df 或缺失列返回空)
+        if isinstance(codes, pd.DataFrame):
+            if len(codes) == 0 or "code" not in codes.columns:
+                return ""
+            codes = codes["code"].tolist()
+        norm = [str(c).zfill(6) for c in (codes or []) if c]
         if not norm:
             return ""
         out = []
@@ -194,7 +200,7 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 二、中长线组合（{len(long_term)} 只，建议持仓 5-20 日）\n")
     if len(long_term) > 0:
-        lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 基本面 | 评分 |仓位%%| 流动性 | 持有期 | 预期收益 |")
+        lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 基本面 | 评分 |仓位%| 流动性 | 持有期 | 预期收益 |")
         lines.append("|------|------|------|------|------|------|--------|--------|------|------|------|--------|-------|")
         for _, row in long_term.iterrows():
             code = row.get("code", "")
@@ -251,12 +257,13 @@ def generate_brief(results: dict, config: dict) -> str:
             lines.append(
                 f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {fund} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {period} | {net_ret:+.1f}% |"
             )
-            _cb = _codes_block(long_term["code"].tolist())
-            if _cb:
-                lines.append("")
-                lines.append(_cb)
     else:
         lines.append("_当前环境不适合中长线持仓_\n")
+    # 同花顺复制块：表格结束后只插一次，勿放进行循环（否则 blockquote 断表格）
+    _cb = _codes_block(long_term)
+    if _cb:
+        lines.append("")
+        lines.append(_cb)
 
     # ============================================================
     # 三、短线组合（1-5日持仓）
@@ -280,7 +287,7 @@ def generate_brief(results: dict, config: dict) -> str:
 
     lines.append(f"\n## 三、短线组合（{len(short_df)} 只，建议持仓 1-5 日）\n")
     if len(short_df) > 0:
-        lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 概念 | 概念涨 | 评分 |仓位%%| 流动性 | 动量20日 | 预期收益 |")
+        lines.append("| 代码 | 名称 | 股价 | 一手价 | 止损价 | 信号 | 技术面 | 概念 | 概念涨 | 评分 |仓位%| 流动性 | 动量20日 | 预期收益 |")
         lines.append("|------|------|------|------|------|------|--------|------|--------|------|------|------|---------|-------|")
         for _, row in short_df.iterrows():
             code = row.get("code", "")
@@ -324,12 +331,12 @@ def generate_brief(results: dict, config: dict) -> str:
             lines.append(
                 f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {concept} | {concept_chg} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {mom20} | {net_ret:+.1f}% |"
             )
-            _cb = _codes_block(short_df["code"].tolist())
-            if _cb:
-                lines.append("")
-                lines.append(_cb)
     else:
         lines.append("_今日无短线候选_\n")
+    _cb = _codes_block(short_df)
+    if _cb:
+        lines.append("")
+        lines.append(_cb)
 
     # 篮子仓位说明 (修复: 单只不再按 position_cap 满算)
     lines.append(
@@ -357,12 +364,12 @@ def generate_brief(results: dict, config: dict) -> str:
             amt = f"{row.get('amount', 0)/1e8:.1f}" if row.get("amount") else "-"
             advice = "定投" if row.get("score", 0) > 70 else "关注"
             lines.append(f"| {code} | {name} | {etype} | {settle} | {mom20} | {amt} | {advice} |")
-            _cb = _codes_block(etf_picks["code"].tolist())
-            if _cb:
-                lines.append("")
-                lines.append(_cb)
     else:
         lines.append("_ETF 数据源暂不可用_\n")
+    _cb = _codes_block(etf_picks)
+    if _cb:
+        lines.append("")
+        lines.append(_cb)
 
     # ============================================================
     # 五、持仓与操作
@@ -405,12 +412,12 @@ def generate_brief(results: dict, config: dict) -> str:
             if not reasons:
                 reasons.append("综合因子")
             lines.append(f"| {code} | {name} | {sector} | {score:.1f} | {', '.join(reasons[:2])} |")
-            _cb = _codes_block(watchlist["code"].tolist())
-            if _cb:
-                lines.append("")
-                lines.append(_cb)
     else:
         lines.append("_今日无观察名单_\n")
+    _cb = _codes_block(watchlist)
+    if _cb:
+        lines.append("")
+        lines.append(_cb)
 
     # ============================================================
     #  七、持仓追踪与建议

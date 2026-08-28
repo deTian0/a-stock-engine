@@ -127,3 +127,45 @@ def test_tech_columns_use_enricher_fields(base_results, config):
     # 技术面列应呈现 enricher 的 tech_ma/tech_macd, 而非恒为 '-'
     assert "MA20>MA60" in out
     assert "金叉" in out
+
+
+def test_codes_block_once_per_section_not_per_row(base_results, config):
+    """回归: 复制块必须每节仅一次(表格之后), 而非每行重复。
+
+    旧 bug 把 _cb 写进行循环, 导致表格被 blockquote 从中打断、渲染全乱。
+    中长线3行 + 短线3行 -> 复制块应仅出现 2 次(每节一次), 而非 6 次(每行一次)。
+    """
+    q = pd.DataFrame({
+        "code": ["600519", "000001", "300750"], "name": ["茅台", "平安", "宁德"],
+        "composite_score": [85, 70, 65], "roe": [25, 12, 15],
+        "momentum_20d": [3, 2, 1], "entry_ok": [True, True, True],
+        "sector": ["白酒", "银行", "电池"], "close": [1800, 15, 200],
+    })
+    s = pd.DataFrame({
+        "code": ["601318", "600036", "000333"], "name": ["平安2", "招行", "美的"],
+        "composite_score": [80, 75, 72], "roe": [14, 16, 18],
+        "momentum_20d": [2, 2, 1], "entry_ok": [True, True, True],
+        "sector": ["保险", "银行", "家电"], "close": [55, 40, 70],
+    })
+    res = dict(base_results)
+    res["categories"] = {"②A_质量榜": q, "②B_短线榜": s}
+    out = generate_brief(res, config)
+    # 每节仅一次: ②A(3行) + ②B(3行) + 七、持仓(base_results 含持仓) = 3 块
+    # 若旧 bug 把块写进行循环, 应为 6 块(每行一次) -> 用 "<行数" 强约束
+    n_blocks = out.count("同花顺自选(复制)")
+    assert n_blocks == 3, f"复制块应每节一次(②A+②B+持仓=3), 实际 {n_blocks}"
+    assert n_blocks < 6, "复制块被插进行循环(每行一次=6块)——回归!"
+
+
+def test_header_no_double_percent(base_results, config):
+    """回归: 表头仓位列应为 '仓位%', 不得残留 '仓位%%' 转义 bug。"""
+    df = pd.DataFrame({
+        "code": ["600519"], "name": ["茅台"], "composite_score": [85],
+        "roe": [25], "momentum_20d": [3], "entry_ok": [True],
+        "sector": ["白酒"], "close": [1800],
+    })
+    res = dict(base_results)
+    res["categories"] = {"②A_质量榜": df}
+    out = generate_brief(res, config)
+    assert "仓位%%" not in out
+    assert "|仓位%|" in out

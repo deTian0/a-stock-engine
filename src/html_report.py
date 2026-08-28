@@ -161,6 +161,7 @@ tr:hover{{background:#f5f7fa}}
     else:
         html += '<p style="color:#999">暂无中长线推荐</p>'
     html += '</div>'
+    html += _html_codes_block(quality, "中长线")
 
     # === 短线表 ===
     html += '<div class="section"><h2>⚡ 短线组合（建议持仓 1-5 日）</h2>'
@@ -185,6 +186,7 @@ tr:hover{{background:#f5f7fa}}
     else:
         html += '<p style="color:#999">暂无短线推荐</p>'
     html += '</div>'
+    html += _html_codes_block(short_list, "短线")
 
     # === ETF ===
     html += '<div class="section"><h2>📦 ETF 组合</h2>'
@@ -201,6 +203,7 @@ tr:hover{{background:#f5f7fa}}
     else:
         html += '<p style="color:#999">ETF数据暂不可用</p>'
     html += '</div>'
+    html += _html_codes_block(etf_picks, "ETF")
 
     # === ECharts JS ===
     html += f"""
@@ -234,6 +237,7 @@ tr:hover{{background:#f5f7fa}}
 """
 
     html += f'<div class="footer">🚀 自动生成于 {datetime.now().strftime("%Y-%m-%d %H:%M")} | Powered by a-stock-engine</div>'
+    html += '<script>function copyCodes(btn){var c=btn.getAttribute("data-codes")||"";if(navigator.clipboard){navigator.clipboard.writeText(c).then(function(){var t=btn.textContent;btn.textContent="已复制";setTimeout(function(){btn.textContent=t;},1500);});}else{var ta=document.createElement("textarea");ta.value=c;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);btn.textContent="已复制";setTimeout(function(){btn.textContent="复制全部";},1500);}}</script>'
     html += '</body></html>'
     return html
 
@@ -251,3 +255,28 @@ def _fmt_val(val, pct=False):
     if pct:
         return f"{val:+.1f}%"
     return f"{val:.2f}"
+
+
+def _html_codes_block(codes, label=""):
+    """生成可一键复制到同花顺自选的代码块（与 MD 简报同逻辑：每行最多5个）。
+
+    入参 codes 可为本节 DataFrame（自动安全提取 'code' 列）或代码列表。
+    """
+    if isinstance(codes, pd.DataFrame):
+        if len(codes) == 0 or "code" not in codes.columns:
+            return ""
+        codes = codes["code"].tolist()
+    norm = [str(c).zfill(6) for c in (codes or []) if c]
+    if not norm:
+        return ""
+    joined = " ".join(norm)
+    lines = [" ".join(norm[i:i + 5]) for i in range(0, len(norm), 5)]
+    disp = "\n".join(lines)
+    lbl = f" · {label}" if label else ""
+    return (
+        '<div class="codes-block">'
+        f'<div class="codes-label">📋 <b>同花顺自选（一键复制）</b>{lbl}</div>'
+        f'<pre class="codes-text">{disp}</pre>'
+        f'<button class="copy-btn" data-codes="{joined}" onclick="copyCodes(this)">复制全部</button>'
+        '</div>'
+    )
