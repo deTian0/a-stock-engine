@@ -79,3 +79,51 @@ def test_etf_settlement_labels(base_results, config):
     out = generate_brief(res, config)
     # 511880 -> T+0; 515790 -> T+1
     assert "T+0" in out and "T+1" in out
+
+
+def test_codes_block_copyable_per_section(base_results, config):
+    """新增功能: 每个板块下增加一行可直复制进同花顺的代码, 每行最多 5 个。"""
+    import re
+    df = pd.DataFrame({
+        "code": ["600519", "000001", "300750", "000858", "600036", "601318"],
+        "name": ["茅台", "平安", "宁德", "五粮液", "招行", "平安保险"],
+        "composite_score": [85, 70, 65, 80, 75, 72],
+        "roe": [25, 12, 15, 20, 16, 14],
+        "momentum_20d": [3, 2, 1, 4, 2, 1],
+        "entry_ok": [True, True, True, True, True, True],
+        "sector": ["白酒", "银行", "电池", "白酒", "银行", "保险"],
+        "close": [1800, 15, 200, 150, 40, 55],
+    })
+    res = dict(base_results)
+    res["categories"] = {"②A_质量榜": df}
+    out = generate_brief(res, config)
+    # 出现同花顺复制块标记
+    assert "同花顺自选(复制)" in out
+    # 每行复制块内 6 位代码数 <= 5
+    block_lines = [ln for ln in out.splitlines() if "同花顺自选(复制)" in ln]
+    assert block_lines, "未生成复制块"
+    for ln in block_lines:
+        codes = re.findall(r"\d{6}", ln)
+        assert len(codes) <= 5, f"超过5个/行: {ln}"
+    # 6 只代码全部出现在复制块中(跨行拆分)
+    all_codes = [c for ln in block_lines for c in re.findall(r"\d{6}", ln)]
+    for c in ["600519", "000001", "300750", "000858", "600036", "601318"]:
+        assert c in all_codes
+
+
+def test_tech_columns_use_enricher_fields(base_results, config):
+    """修复验证: enricher 实际产出 tech_ma/tech_macd/tech_signal,
+    旧列名 ma_status/macd_signal 不再生成 -> 技术面列必须显示真实值而非 '-'。"""
+    df = pd.DataFrame({
+        "code": ["600519"], "name": ["茅台"], "composite_score": [85],
+        "roe": [25], "momentum_20d": [3], "entry_ok": [True],
+        "sector": ["白酒"], "close": [1800],
+        # 仅有 enricher 实际产出的列, 无旧列名 ma_status/macd_signal
+        "tech_ma": ["MA20>MA60"], "tech_macd": ["金叉"], "tech_signal": ["偏多"],
+    })
+    res = dict(base_results)
+    res["categories"] = {"②A_质量榜": df}
+    out = generate_brief(res, config)
+    # 技术面列应呈现 enricher 的 tech_ma/tech_macd, 而非恒为 '-'
+    assert "MA20>MA60" in out
+    assert "金叉" in out

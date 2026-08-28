@@ -571,12 +571,15 @@ class TushareProvider:
                         m = self.pro.ths_member(ts_code=batch)
                         if m is not None and len(m) > 0:
                             for _, r in m.iterrows():
-                                stock_code = _from_ts_code(str(r["con_code"]))
-                                con_code = str(r["ts_code"])
-                                con_name = concept_names.get(con_code, "")
-                                if stock_code not in member_map:
-                                    member_map[stock_code] = []
-                                member_map[stock_code].append((con_code, con_name))
+                                try:
+                                    stock_code = _from_ts_code(str(r["con_code"]))
+                                    con_code = str(r["ts_code"])
+                                    con_name = concept_names.get(con_code, "")
+                                    if stock_code not in member_map:
+                                        member_map[stock_code] = []
+                                    member_map[stock_code].append((con_code, con_name))
+                                except Exception:
+                                    continue  # 跳过单只坏行
                     except Exception:
                         continue
                 member_df = pd.DataFrame([

@@ -14,11 +14,50 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def enrich_amount(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    补全成交额(amount)与量比(volume_ratio)——流动性标签(liquidity_tag)与ETF成交额的前提列。
+
+    回退链: 已有有效 amount/量比 → 保持; 缺失或<=0 → westock batch_quotes(实时, 含 amount/volume_ratio)。
+    仅填充缺失/为0的行, 绝不覆盖已有有效值。
+    """
+    if len(df) == 0 or "code" not in df.columns:
+        return df
+    need_amt = ("amount" not in df.columns) or bool((df["amount"].isna() | (df["amount"] <= 0)).all())
+    need_vr = ("volume_ratio" not in df.columns) or bool((df["volume_ratio"].isna() | (df["volume_ratio"] <= 0)).all())
+    if not need_amt and not need_vr:
+        return df
+    codes = df["code"].astype(str).str.zfill(6).unique().tolist()
+    try:
+        from westock_helpers import batch_quotes
+        q = batch_quotes(codes)
+        if not q:
+            logger.warning("amount/量比: westock返回空")
+            return df
+        if need_amt:
+            if "amount" not in df.columns:
+                df["amount"] = np.nan
+            amap = df["code"].astype(str).str.zfill(6).map(lambda c: (q.get(c) or {}).get("amount"))
+            mask = df["amount"].isna() | (df["amount"] <= 0)
+            df.loc[mask, "amount"] = amap[mask]
+        if need_vr:
+            if "volume_ratio" not in df.columns:
+                df["volume_ratio"] = np.nan
+            vmap = df["code"].astype(str).str.zfill(6).map(lambda c: (q.get(c) or {}).get("volume_ratio"))
+            mask = df["volume_ratio"].isna() | (df["volume_ratio"] <= 0)
+            df.loc[mask, "volume_ratio"] = vmap[mask]
+        logger.info(f"amount/量比补全: westock({len(q)})")
+    except Exception as e:
+        logger.warning(f"amount/量比补全异常: {e}")
+    return df
+
+
 def enrich_l4_results(l4_results: pd.DataFrame, dry_run: bool = False) -> pd.DataFrame:
     """
     对 L4 选股结果补全缺失字段。回退链:
-      close → tushare daily_basic → westock kline
+      close → tushare daily_basic → westock kline → akshare 实时
       name  → tushare stock_basic
+      amount/量比 → westock batch_quotes（流动性标签与技术面量比的前提）
       概念   → tushare ths_index/member/daily
       技术面 → westock technical
     """
@@ -26,6 +65,9 @@ def enrich_l4_results(l4_results: pd.DataFrame, dry_run: bool = False) -> pd.Dat
         return l4_results
 
     df = l4_results.copy()
+    # 先行补全 amount/量比: 下游 enrich_risk_metrics 的 liquidity_tag 依赖 amount,
+    # 否则整段跳过 -> 早盘简报"流动性"列恒为 '-'。
+    df = enrich_amount(df)
     codes = df["code"].astype(str).str.zfill(6).unique().tolist()
     report = {}
 
@@ -87,47 +129,72 @@ def enrich_l4_results(l4_results: pd.DataFrame, dry_run: bool = False) -> pd.Dat
                 logger.warning(f"当日股价 akshare 兜底异常: {e}")
 
     # ---- 3. 概念板块 ----
-    need_concept = ("concept_name" not in df.columns or 
-                    df["concept_name"].isna().all() or 
+    need_concept = ("concept_name" not in df.columns or
+                    df["concept_name"].isna().all() or
                     df["concept_name"].fillna("").eq("").all())
     if need_concept:
         try:
             from tushare_provider import get_tushare
+            from database import get_db
             ts = get_tushare()
-            cs = ts.get_concept_stats()
-            if len(cs) > 0 and "code" in cs.columns and "concept_name" in cs.columns:
-                concept_map = {}
+
+            def _build_concept_map(cs: pd.DataFrame) -> dict:
+                """从 concept_stats 构建 {code: (name, chg)}，取每只股票最热概念；逐行防御，坏行跳过。"""
+                cmap = {}
+                if len(cs) == 0 or "code" not in cs.columns or "concept_name" not in cs.columns:
+                    return cmap
                 for _, r in cs.iterrows():
-                    c = str(r["code"]).zfill(6)
-                    if c not in concept_map or abs(r.get("concept_chg", 0)) > abs(concept_map.get(c, (0,))[1]):
-                        concept_map[c] = (r["concept_name"], r.get("concept_chg", 0))
-                
+                    try:
+                        c = str(r.get("code", "")).zfill(6)
+                        if not c or c == "000000":
+                            continue
+                        name = r.get("concept_name", "-") or "-"
+                        chg = r.get("concept_chg", 0)
+                        chg = float(chg) if pd.notna(chg) else 0.0
+                        prev = cmap.get(c)
+                        if prev is None or abs(chg) > abs(float(prev[1])):
+                            cmap[c] = (name, chg)
+                    except Exception:
+                        continue  # 跳过单只坏行, 不整段失败
+                return cmap
+
+            def _apply_concept(cm: dict):
                 df["concept_name"] = df["code"].astype(str).str.zfill(6).map(
-                    lambda c: concept_map.get(c, ("-", 0))[0])
+                    lambda c: cm.get(c, ("-", 0))[0])
                 df["concept_chg"] = df["code"].astype(str).str.zfill(6).map(
-                    lambda c: concept_map.get(c, ("-", 0))[1])
+                    lambda c: cm.get(c, ("-", 0))[1])
+
+            def _clear_concept_cache():
+                try:
+                    db = get_db()
+                    db.conn.execute(
+                        "DELETE FROM market_data_cache WHERE data_type='concept_stats' "
+                        "OR data_type='concept_members'")
+                    db.conn.commit()
+                except Exception:
+                    pass
+
+            # 回退链: 首次尝试 -> 空或异常 都清缓存重取一次
+            # (修复: 旧逻辑仅"返回空"走重试分支, too many values to unpack 等异常被吞,
+            #  概念补全静默失败; 现统一重试, 与"已 retry 成功"的实际表现对齐)
+            cs = None
+            for attempt in range(2):
+                try:
+                    cs = ts.get_concept_stats()
+                    if cs is not None and len(cs) > 0 and "concept_name" in cs.columns:
+                        break
+                except Exception as e:
+                    logger.warning(f"概念板块获取异常(attempt {attempt+1}): {e}")
+                _clear_concept_cache()  # 失败 -> 清过期缓存后重试
+
+            if cs is not None and len(cs) > 0 and "concept_name" in cs.columns:
+                cm = _build_concept_map(cs)
+                _apply_concept(cm)
                 report["concept"] = f"tushare({df['concept_name'].notna().sum()})"
             else:
-                logger.warning("概念板块: tushare返回空, 缓存可能过期, 删除缓存重试")
-                # 清缓存重试
-                from database import get_db
-                db = get_db()
-                db.conn.execute("DELETE FROM market_data_cache WHERE data_type='concept_stats' OR data_type='concept_members'")
-                db.conn.commit()
-                cs2 = ts.get_concept_stats()
-                if len(cs2) > 0:
-                    concept_map = {}
-                    for _, r in cs2.iterrows():
-                        c = str(r["code"]).zfill(6)
-                        if c not in concept_map:
-                            concept_map[c] = (r["concept_name"], r.get("concept_chg", 0))
-                    df["concept_name"] = df["code"].astype(str).str.zfill(6).map(lambda c: concept_map.get(c, ("-", 0))[0])
-                    df["concept_chg"] = df["code"].astype(str).str.zfill(6).map(lambda c: concept_map.get(c, ("-", 0))[1])
-                    report["concept"] = f"tushare(retry:{df['concept_name'].notna().sum()})"
-                else:
-                    report["concept"] = "FAILED"
+                report["concept"] = "FAILED"
         except Exception as e:
-            logger.warning(f"概念补全异常: {e}")
+            logger.warning(f"概念补全异常(已跳过, 不影响其它字段): {e}")
             report["concept"] = f"ERROR:{e}"
 
     # ---- 4. 技术面信号 ----

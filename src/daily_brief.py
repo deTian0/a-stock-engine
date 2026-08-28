@@ -63,6 +63,19 @@ def generate_brief(results: dict, config: dict) -> str:
             return "T+0"
         return "T+1"
 
+    def _codes_block(codes, per_line: int = 5) -> str:
+        """生成可直接复制到同花顺自选的代码块。每行最多 per_line 个（6位代码空格分隔）。
+
+        返回 blockquote 形式的多行文本（每行一个 '> '），无代码时返回空串。
+        """
+        norm = [str(c).zfill(6) for c in codes if c]
+        if not norm:
+            return ""
+        out = []
+        for i in range(0, len(norm), per_line):
+            out.append("> 📋 **同花顺自选(复制)**: " + " ".join(norm[i:i + per_line]))
+        return "\n".join(out)
+
     def _fmt_pct(val, default="-"):
         """安全格式化百分比。"""
         if val is None or not pd.notna(val):
@@ -208,9 +221,10 @@ def generate_brief(results: dict, config: dict) -> str:
                 signal = "质量入围"
             else:
                 signal = "-"
-            # 技术面: MA + MACD
-            ma_status = row.get("ma_status", "")
-            macd_signal = row.get("macd_signal", "")
+            # 技术面: MA + MACD（enrich 实际产出 tech_ma/tech_macd/tech_signal；
+            # 旧列名 ma_status/macd_signal 已不再生成, 作向后兼容回退, 否则恒为 '-'）
+            ma_status = row.get("ma_status") or row.get("tech_ma", "")
+            macd_signal = row.get("macd_signal") or row.get("tech_macd", "")
             tech_parts = []
             if ma_status:
                 tech_parts.append(str(ma_status))
@@ -237,6 +251,10 @@ def generate_brief(results: dict, config: dict) -> str:
             lines.append(
                 f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {fund} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {period} | {net_ret:+.1f}% |"
             )
+            _cb = _codes_block(long_term["code"].tolist())
+            if _cb:
+                lines.append("")
+                lines.append(_cb)
     else:
         lines.append("_当前环境不适合中长线持仓_\n")
 
@@ -294,8 +312,8 @@ def generate_brief(results: dict, config: dict) -> str:
             else:
                 signal = "-"
             # 技术面
-            ma_status = row.get("ma_status", "")
-            macd_signal = row.get("macd_signal", "")
+            ma_status = row.get("ma_status") or row.get("tech_ma", "")
+            macd_signal = row.get("macd_signal") or row.get("tech_macd", "")
             tech_parts = []
             if ma_status:
                 tech_parts.append(str(ma_status))
@@ -306,6 +324,10 @@ def generate_brief(results: dict, config: dict) -> str:
             lines.append(
                 f"| {code} | {name} | {close_str} | {lot_str} | {stop_str} | {signal} | {tech} | {concept} | {concept_chg} | {score:.1f} | {pos_ratio:.1f}% | {liq} | {mom20} | {net_ret:+.1f}% |"
             )
+            _cb = _codes_block(short_df["code"].tolist())
+            if _cb:
+                lines.append("")
+                lines.append(_cb)
     else:
         lines.append("_今日无短线候选_\n")
 
@@ -335,6 +357,10 @@ def generate_brief(results: dict, config: dict) -> str:
             amt = f"{row.get('amount', 0)/1e8:.1f}" if row.get("amount") else "-"
             advice = "定投" if row.get("score", 0) > 70 else "关注"
             lines.append(f"| {code} | {name} | {etype} | {settle} | {mom20} | {amt} | {advice} |")
+            _cb = _codes_block(etf_picks["code"].tolist())
+            if _cb:
+                lines.append("")
+                lines.append(_cb)
     else:
         lines.append("_ETF 数据源暂不可用_\n")
 
@@ -379,6 +405,10 @@ def generate_brief(results: dict, config: dict) -> str:
             if not reasons:
                 reasons.append("综合因子")
             lines.append(f"| {code} | {name} | {sector} | {score:.1f} | {', '.join(reasons[:2])} |")
+            _cb = _codes_block(watchlist["code"].tolist())
+            if _cb:
+                lines.append("")
+                lines.append(_cb)
     else:
         lines.append("_今日无观察名单_\n")
 
@@ -430,6 +460,11 @@ def generate_brief(results: dict, config: dict) -> str:
                 f"| {code_str} | {name} | {cur_price:.3f} | {cost:.3f} | "
                 f"{pnl:+.1f}({pnl_pct:+.1f}%) | {shares} | {mv:.0f} | {advice} |"
             )
+
+        _cb = _codes_block(list(holdings.keys()))
+        if _cb:
+            lines.append("")
+            lines.append(_cb)
 
         position_pct = (total_mv / total_assets * 100) if total_assets > 0 else 0
         lines.append(f"\n**当前状态**: 总持仓 {total_mv:.0f} 元 | 仓位 {position_pct:.1f}% | 可用资金 {cash:.0f} 元")

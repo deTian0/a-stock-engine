@@ -1208,6 +1208,14 @@ class MultiFactorEngine:
 
         # ETF 选股
         etf_picks = self.select_etfs()
+        # ETF 成交额兜底: daily_price 缺 amount 时回退为 0 -> 简报显示 '-',
+        # 用 westock 实时行情补全 (避免 ETF 部分成交额缺失)
+        try:
+            from data_enricher import enrich_amount
+            if len(etf_picks) > 0:
+                etf_picks = enrich_amount(etf_picks)
+        except Exception as e:
+            logger.warning(f"ETF amount 补全失败(沿用 daily_price): {e}")
 
         elapsed = time.time() - start_time
         logger.info(f"选股引擎运行完成，耗时 {elapsed:.1f}s")
