@@ -176,6 +176,18 @@ def generate_report(result: dict) -> str:
         lines.append(f"\n## 三、最差交易\n")
         lines.append(f"**{w['code']}**: {w['entry_date']}买@{w['entry_price']} → {w['exit_date']}卖@{w['exit_price']} ({w['return_pct']:+.2f}%)\n")
 
+    # 口径与基线对照: 防止把不同权重口径的回测结果横比误读
+    try:
+        from src.lvrev_scorer import W_DEFAULT
+        wtxt = (f"低波{W_DEFAULT.get('vol',0)*100:.0f}% / 反转{W_DEFAULT.get('rev',0)*100:.0f}%"
+                f" / 质量{W_DEFAULT.get('q',0)*100:.0f}% / 成长{W_DEFAULT.get('g',0)*100:.0f}%")
+    except Exception:
+        wtxt = "vol0.5/rev0.5/q0/g0 (v4.29 canonical)"
+    lines.append(f"\n## 四、口径与基线对照\n")
+    lines.append(f"- 选股内核: lvrev（低波+反转+质量），当前 canonical 权重 = **{wtxt}**（v4.29 固化，OOS 稳健口径）。\n")
+    lines.append(f"- 回测基线: 当前权重样本内 = **+12.94%** / 夏普0.23 / 回撤15.0%；v4.26 旧权重(vol0.45/rev0.35/q0.12)=+28.59% 为样本内虚高，**不可横比**。\n")
+    lines.append(f"- 本报告复盘**实盘选股记录**（近 180 天），非 lvrev 策略全样本模拟；收益口径为已落地交易。\n")
+
     lines.append(f"\n---\n*自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
     return "\n".join(lines)
 

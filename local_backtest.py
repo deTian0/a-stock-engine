@@ -1121,6 +1121,15 @@ def generate_html_report(pf: dict, config: dict) -> str:
     values = [p[1] for p in portfolio]
     initial = pf["initial"]
 
+    # 当前实际生效的 lvrev 内核权重（含 main() 的 CLI 覆写 monkeypatch）
+    try:
+        import lvrev_scorer as _lv
+        _w = _lv.W_DEFAULT
+        _wtxt = (f"低波 {_w.get('vol', 0)*100:.0f}% / 反转 {_w.get('rev', 0)*100:.0f}% "
+                 f"/ 质量 {_w.get('q', 0)*100:.0f}% / 成长 {_w.get('g', 0)*100:.0f}%")
+    except Exception:
+        _wtxt = "未知"
+
     # 计算回撤序列
     peak = values[0]
     drawdowns = []
@@ -1182,6 +1191,12 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
   佣金: 万0.854免5 | 股票买入0.0085% / 卖出0.0585%(含印花税万5) | ETF 0.0085%(免印花税)
 </p>
 
+<p style="text-align:center;color:#94a3b8;margin-bottom:8px;font-size:13px">
+  lvrev 内核权重（当前实际生效）: {_wtxt} ｜ 价值因子 {'开' if VALUE_FACTOR else '关'} ｜ 权重覆写: {WEIGHT_TAG or '无(默认)'}
+</p>
+<p style="text-align:center;color:#f59e0b;margin-bottom:20px;font-size:12px">
+  ⚠️ 回测基线对照: 当前权重(vol0.5/rev0.5/q0) = <b>+12.94%</b> / 夏普0.23 / 回撤15.0% ｜ v4.26 旧权重(vol0.45/rev0.35/q0.12) = +28.59%（样本内虚高, 非当前口径, 勿横比）
+</p>
 <div class=\"cards\">
   <div class=\"card\"><div class=\"label\">初始资金</div><div class=\"value blue\">¥{initial:,.0f}</div></div>
   <div class=\"card\"><div class=\"label\">最终资金</div><div class=\"value {'red' if pf['return_pct']>0 else 'green'}\">¥{pf['final']:,.0f}</div></div>
