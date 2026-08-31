@@ -1144,15 +1144,16 @@ def generate_html_report(pf: dict, config: dict) -> str:
     )
 
     sell = pf.get("sell_stats", {})
+    tt = sell.get("total_trades", 0) or 0
     reason_rows = "".join(
-        f"<tr><td>{k}</td><td>{v}</td><td>{v/sell['total_trades']*100:.0f}%</td></tr>"
+        f"<tr><td>{k}</td><td>{v}</td><td>{(v/tt*100) if tt else 0:.0f}%</td></tr>"
         for k, v in sell.get("reasons", {}).items()
-    ) if sell else ""
+    ) if sell and tt else ""
     dist = sell.get("net_return_dist", {})
     dist_rows = "".join(
-        f"<tr><td>{k}</td><td>{v}</td><td>{v/sell['total_trades']*100:.0f}%</td></tr>"
+        f"<tr><td>{k}</td><td>{v}</td><td>{(v/tt*100) if tt else 0:.0f}%</td></tr>"
         for k, v in dist.items()
-    ) if dist else ""
+    ) if dist and tt else ""
     win_rate = sell.get("win_rate", 0)
     pl_ratio = sell.get("profit_loss_ratio")
     mg = pf.get("market_gate", {"enabled": False})
