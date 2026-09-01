@@ -56,7 +56,7 @@ TARGET_BASE = 5.0            # 基础目标收益 (%)  M5: 3→5
 TRAIL_STOP_PCT = 6.0         # M2: 移动止损, 自持仓高点回撤比例 (%)
 MAX_POSITIONS = 15           # M4: 最大持仓数 (降低分散度)
 MAX_HOLD_DAYS = 60            # C1: 动态持有安全上限(极长持有才强制了结, 非正常退出)
-MIN_HOLD = 30                 # 最小持有期(天): 非硬止损卖出需持有>=N天 — v4.8 扫描5/10/15/20/25/30, mh30最优(+49.6%, 回撤-27.8%, 夏普0.31, 盈亏比2.48)
+MIN_HOLD = 45                 # 最小持有期(天): 非硬止损卖出需持有>=N天 — v4.30 扫描(base/mh30/sl8/mps0.80): mh45 全面最优(+23.05%, 回撤11.2%, 夏普0.34, 盈亏比1.75), 显著优于 mh30(+12.94%/15.0%/0.23); 低换手=少成本+让盈利跑久(结构性改善, 非单年运气)
 PULLBACK_GUARD = False        # 入场回踩不破: 近5日最低价>=MA20 才买(降换手实验)
 LOT_MODE = False               # 百股取整模式: False=分数份额(资本无关, 回测标准假设); True=百股(1手)取整, 收益对本金敏感, 仅用于小账户可执行估计
 # 选股 alpha 内核: "trend"(v4.8 买强/动量, 仅作对照) | "lowvol_rev"(低波+反转+质量, 真 alpha 路线, 已固化默认)
@@ -1196,7 +1196,7 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
   lvrev 内核权重（当前实际生效）: {_wtxt} ｜ 价值因子 {'开' if VALUE_FACTOR else '关'} ｜ 权重覆写: {WEIGHT_TAG or '无(默认)'}
 </p>
 <p style="text-align:center;color:#f59e0b;margin-bottom:20px;font-size:12px">
-  ⚠️ 回测基线对照: 当前权重(vol0.5/rev0.5/q0) = <b>+12.94%</b> / 夏普0.23 / 回撤15.0% ｜ v4.26 旧权重(vol0.45/rev0.35/q0.12) = +28.59%（样本内虚高, 非当前口径, 勿横比）
+  ⚠️ 回测基线对照: 当前配置(vol0.5/rev0.5/q0, 最小持有45天) = <b>+23.05%</b> / 夏普0.34 / 回撤11.2% ｜ v4.26 旧口径(vol0.45/rev0.35/q0.12, mh30) = +28.59%（样本内虚高+旧权重+旧持有期, 非当前口径, 勿横比）
 </p>
 <div class=\"cards\">
   <div class=\"card\"><div class=\"label\">初始资金</div><div class=\"value blue\">¥{initial:,.0f}</div></div>
