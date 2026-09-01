@@ -1196,7 +1196,7 @@ th{{color:#94a3b8;font-size:13px;text-transform:uppercase}}
   lvrev 内核权重（当前实际生效）: {_wtxt} ｜ 价值因子 {'开' if VALUE_FACTOR else '关'} ｜ 权重覆写: {WEIGHT_TAG or '无(默认)'}
 </p>
 <p style="text-align:center;color:#f59e0b;margin-bottom:20px;font-size:12px">
-  ⚠️ 回测基线对照: 当前配置(vol0.5/rev0.5/q0, 最小持有45天) = <b>+23.05%</b> / 夏普0.34 / 回撤11.2% ｜ v4.26 旧口径(vol0.45/rev0.35/q0.12, mh30) = +28.59%（样本内虚高+旧权重+旧持有期, 非当前口径, 勿横比）
+  ⚠️ 回测基线对照(本表为 lvrev 单策略·样本内模拟器, 非生产口径): 当前配置(vol0.5/rev0.5/q0, 最小持有45天) = <b>+23.05%</b> / 夏普0.34 / 回撤11.2% ｜ v4.26 旧口径(vol0.45/rev0.35/q0.12, mh30) = +28.59%（样本内虚高+旧权重+旧持有期, 非当前口径, 勿横比）｜ **生产基线 = path-C 行业轮动 tilt OOS +53.24%（见 empirical/BASELINE.md, 含行业 tilt + 样本外验证, 远高于本模拟器）**
 </p>
 <div class=\"cards\">
   <div class=\"card\"><div class=\"label\">初始资金</div><div class=\"value blue\">¥{initial:,.0f}</div></div>
