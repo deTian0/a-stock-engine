@@ -143,6 +143,10 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
             agg_spec["total_amt"] = ("amount", "sum")
         sector_agg = stock_list.groupby("sector").agg(**agg_spec).reset_index()
         sector_agg = sector_agg[sector_agg["stock_count"] >= 3]  # 至少3只股票
+        # 剔除「综合」兜底板块 + 板块均值超 ±25% 极值（新股/数据异常）
+        # 与 report_renderer._clean_top_sectors 保持一致，确保 .md / .html 同口径
+        sector_agg = sector_agg[sector_agg["sector"] != "综合"]
+        sector_agg = sector_agg[(sector_agg["avg_chg"] <= 25) & (sector_agg["avg_chg"] >= -25)]
         top_sectors = sector_agg.nlargest(5, "avg_chg")
 
         lines.append("| 板块 | 平均涨幅 | 股票数 | 龙头涨幅 | 成交额(亿) |")
@@ -190,6 +194,9 @@ def review_sectors(cli, price_loader, all_stocks: pd.DataFrame = None,
                 name = str(row.get("name", code))
                 if name.lower() in ("nan", "none", ""):
                     name = code
+                # 剔除 N 字头新股（首日无涨跌幅）与 ST/*ST，与 HTML 渲染口径一致
+                if name.startswith("N") or "ST" in name.upper():
+                    continue
                 # 当日股价 (从 close 列)
                 close = row.get("close", 0)
                 close_str = f"{close:.2f}" if pd.notna(close) and close > 0 else "-"
