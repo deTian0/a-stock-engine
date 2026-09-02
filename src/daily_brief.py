@@ -167,7 +167,7 @@ def generate_brief(results: dict, config: dict) -> str:
     if judgment:
         lines.append(f"_{judgment}_\n")
     lines.append("\n| 指数 | 收盘 | MA20 | MA60 | 站上MA60 |")
-    lines.append("|------|------|------|------|------|----------|")
+    lines.append("|------|------|------|------|----------|")
     if isinstance(regime, dict):
         for code, info in regime.get("indices", {}).items():
             if "error" in info:
@@ -402,6 +402,7 @@ def generate_brief(results: dict, config: dict) -> str:
             code = row.get("code", "")
             name = _fmt_name(row, code)
             sector = row.get("sector", "-")
+            concept = row.get("concept_name", "-") or "-"
             score = row.get("composite_score", 0)
             # 关注理由
             reasons = []
@@ -411,7 +412,7 @@ def generate_brief(results: dict, config: dict) -> str:
                 reasons.append("动量转正")
             if not reasons:
                 reasons.append("综合因子")
-            lines.append(f"| {code} | {name} | {sector} | {score:.1f} | {', '.join(reasons[:2])} |")
+            lines.append(f"| {code} | {name} | {sector} | {concept} | {score:.1f} | {', '.join(reasons[:2])} |")
     else:
         lines.append("_今日无观察名单_\n")
     _cb = _codes_block(watchlist)
