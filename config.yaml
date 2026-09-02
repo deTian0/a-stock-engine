@@ -96,15 +96,16 @@ system:
 
 # --- 账户配置 ---
 account:
-  available_cash: 8652.88        # 可用资金（元）— 2026-09-02 华宝证券截图
-  total_assets: 11785.10         # 总资产（华宝证券）— 2026-09-02 截图
+  available_cash: 7669.18        # 可用资金（元）— 2026-09-02 10:04 买入512880(900股@1.093)后
+  total_assets: 11785.10         # 总资产（华宝证券）— 2026-09-02 截图（买入后手续费可忽略）
   max_position_ratio: 0.80       # 最大仓位比例
   max_single_stock: 0.10         # 单只股票最大占比
-  holdings:                       # 当前持仓（来自华宝证券截图 2026-09-02 09:37）
+  holdings:                       # 当前持仓（华宝证券 2026-09-02 10:04）
     # 格式: code: {name, shares, cost_price}
     # 一手 = 100股，最小买入数 = 1手
     "159852": {name: "软件ETF嘉实", shares: 1700, cost_price: 0.693}
     "159869": {name: "游戏ETF华夏", shares: 1800, cost_price: 1.147}
+    "512880": {name: "证券ETF国泰", shares: 900, cost_price: 1.093}
 
 # --- 市场环境判断 (L0) ---
 env_regime:
