@@ -51,18 +51,24 @@ def _strip_tracking_heading(md: str) -> str:
 
 
 def _inject_westock_quotes(df: pd.DataFrame) -> pd.DataFrame:
-    """注入 westock-data 实时行情（tushare/新浪回退列表可能缺 change_pct/close/amount）。
+    """注入 westock-data 实时行情，覆盖 tushare 的前一交易日兜底值。
 
-    幂等：仅在 change_pct/close/amount 全缺时才触发，注入一次后再次调用为 no-op。
+    为什么必须「覆盖」而不是「填空」：
+      tushare 的 get_stock_list 走 daily_basic(trade_date=<最近已发布交易日>)，
+      在当日 15:30 复盘时今日 EOD 尚未发布，取到的是**前一交易日**收盘价。
+      旧实现只在列全缺/全 NaN 时才注入，导致 close 保持前一日值，而 change_pct
+      被 westock 实时值覆盖 —— 报告出现「今日涨跌幅 + 昨日股价」的错配，
+      章节二的当日股价/一手价格/止损全部偏离一整天涨跌（已实测：2026-09-03
+      海通发展实际 13.31，报告显示 12.10）。
+
+    因此对每个行情字段一律以 westock 实时值为准，仅在实时值缺失处回退到原值
+    （combine_first 语义），既保证时点一致，也不会用 NaN 覆盖已有数据。
+
+    幂等：用 df.attrs 标记而非「列是否为空」来判断，重复调用为 no-op。
     """
     if df is None or len(df) == 0 or "code" not in df.columns:
         return df
-    need = (
-        "change_pct" not in df.columns or df["change_pct"].isna().all()
-        or "close" not in df.columns or df["close"].isna().all()
-        or "amount" not in df.columns or df["amount"].isna().all()
-    )
-    if not need:
+    if df.attrs.get("_westock_quotes_injected"):
         return df
     from westock_helpers import batch_quotes
     quote_map = batch_quotes(df["code"].astype(str).str.zfill(6).tolist())
@@ -72,10 +78,27 @@ def _inject_westock_quotes(df: pd.DataFrame) -> pd.DataFrame:
     qdf["code"] = qdf["code"].astype(str).str.zfill(6)
     qmap = qdf.set_index("code")
     codes_z = df["code"].astype(str).str.zfill(6)
+    refreshed = []
     for col in _QUOTE_COLS:
-        if col in qdf.columns and (col not in df.columns or df[col].isna().all()):
-            df[col] = codes_z.map(qmap[col])
-    logger.info(f"已注入westock实时行情: {len(quote_map)} 只 (涨跌幅覆盖 {df['change_pct'].notna().sum()} 只)")
+        if col not in qdf.columns:
+            continue
+        live = codes_z.map(qmap[col])
+        if col in df.columns:
+            # 实时值优先，缺失处保留原有兜底值
+            merged = live.combine_first(df[col])
+            changed = int((~merged.isna() & ~df[col].isna()
+                           & (merged != df[col])).sum())
+            df[col] = merged
+            if changed:
+                refreshed.append(f"{col}:{changed}")
+        else:
+            df[col] = live
+    df.attrs["_westock_quotes_injected"] = True
+    logger.info(
+        f"已注入westock实时行情: {len(quote_map)} 只 "
+        f"(涨跌幅覆盖 {df['change_pct'].notna().sum()} 只"
+        + (f", 覆盖陈旧字段 {', '.join(refreshed)}" if refreshed else "") + ")"
+    )
     return df
 
 
@@ -506,6 +529,54 @@ def _compute_stop_loss(closes: list[float], close_today: float) -> float | None:
         return round(max(stop, 0.01), 2)
     except Exception:
         return None
+
+
+def _post_track_data_ok(series, min_coverage: float = 0.5,
+                        min_spread: float = 1.0) -> bool:
+    """盘后命中追踪的数据有效性闸门。
+
+    `DataFrame.nlargest(n, col)` 在排序列全为 NaN 或全为同一值时，不会报错，
+    而是退化为「返回原始行序的前 n 行」。afternoon_review 的 all_stocks 原始行序
+    来自 tushare stock_basic（代码升序），因此一旦当日 change_pct 未取到，
+    盘后强势股榜就会被写成 000001/000002/000006… 这类低位代码，并且由于命中
+    统计是累计的，污染会永久留在 picks.db 里。
+
+    两道校验：
+      1. 覆盖率：非空 change_pct 占比需 ≥ min_coverage；
+      2. 离散度：最大值 - 最小值需 ≥ min_spread（个百分点），排除全零/全等值。
+
+    Returns: True 表示数据可信、可写入追踪；False 表示跳过本次写入。
+    """
+    try:
+        s = pd.to_numeric(series, errors="coerce")
+        total = len(s)
+        if total == 0:
+            logger.warning("盘后追踪跳过: change_pct 为空集")
+            return False
+        valid = int(s.notna().sum())
+        coverage = valid / total
+        if coverage < min_coverage:
+            logger.warning(
+                f"盘后追踪跳过: change_pct 覆盖率 {coverage:.1%} "
+                f"({valid}/{total}) < {min_coverage:.0%}，"
+                f"避免 nlargest 退化为代码序污染命中统计"
+            )
+            return False
+        spread = float(s.max() - s.min())
+        if not (spread >= min_spread):
+            logger.warning(
+                f"盘后追踪跳过: change_pct 离散度不足 (max-min={spread:.4f} "
+                f"< {min_spread})，疑为全零/全等值，避免污染命中统计"
+            )
+            return False
+        logger.info(
+            f"盘后追踪数据校验通过: 覆盖率 {coverage:.1%} ({valid}/{total}), "
+            f"涨跌幅区间 {s.min():.2f}% ~ {s.max():.2f}%"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"盘后追踪跳过: change_pct 校验异常 {e}")
+        return False
 
 
 def _build_weekly_track(all_stocks: pd.DataFrame = None, days: int = 7) -> dict:
@@ -1049,12 +1120,17 @@ def main():
         # 记录盘后命中追踪
         try:
             if len(all_stocks) > 0 and "change_pct" in all_stocks.columns:
-                top_gainers = all_stocks.nlargest(30, "change_pct")
-                if "code" in top_gainers.columns:
-                    # 盘后追踪 = 当日涨幅前30强势股观察(非买入候选), 标注观察类目
-                    # 避免未来再写 NULL(与历史补标 ④盘后强势股观察 一致)
-                    track_picks(top_gainers, session_type="post_market",
-                                category="④盘后强势股观察")
+                # 数据有效性闸门: change_pct 全 NaN / 全等值时 nlargest 会退化为
+                # 原始行序(= tushare stock_basic 的代码升序), 从而把 000001/000002...
+                # 这类低位代码误写成「涨幅前30」并永久污染累计命中统计。
+                # 历史已发生 5 个批次(2026-08-10/11/13/17 及 08-18 15:29)共 211 行。
+                if _post_track_data_ok(all_stocks["change_pct"]):
+                    top_gainers = all_stocks.nlargest(30, "change_pct")
+                    if "code" in top_gainers.columns:
+                        # 盘后追踪 = 当日涨幅前30强势股观察(非买入候选), 标注观察类目
+                        # 避免未来再写 NULL(与历史补标 ④盘后强势股观察 一致)
+                        track_picks(top_gainers, session_type="post_market",
+                                    category="④盘后强势股观察")
         except Exception as e:
             logger.debug(f"盘后追踪记录跳过: {e}")
 
