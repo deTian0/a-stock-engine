@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>盘前选股简报 — 2026-09-04</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f5f7fa;color:#333;padding:20px;max-width:1200px;margin:0 auto}
+.header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:24px;border-radius:12px;margin-bottom:20px}
+.header h1{font-size:22px;margin-bottom:8px}
+.header .meta{opacity:.85;font-size:14px}
+.summary{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.card{background:#fff;border-radius:10px;padding:16px 20px;flex:1;min-width:160px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.card .label{font-size:12px;color:#999;margin-bottom:4px}
+.card .value{font-size:24px;font-weight:700}
+.card.warn{border-left:3px solid #f56c6c}
+.card.ok{border-left:3px solid #67c23a}
+.card.info{border-left:3px solid #409eff}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+.chart-box{background:#fff;border-radius:10px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);height:300px}
+.section{background:#fff;border-radius:10px;padding:20px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.section h2{font-size:18px;margin-bottom:12px;color:#667eea}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f0f2f5;padding:8px 6px;text-align:left;font-weight:600;border-bottom:2px solid #e4e7ed;white-space:nowrap}
+td{padding:6px;border-bottom:1px solid #ebeef5}
+tr:hover{background:#f5f7fa}
+.bullish{color:#67c23a;font-weight:600}
+.bearish{color:#f56c6c;font-weight:600}
+.neutral{color:#e6a23c}
+.tag{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600}
+.tag-green{background:#e1f3d8;color:#67c23a}
+.tag-red{background:#fef0f0;color:#f56c6c}
+.tag-yellow{background:#fdf6ec;color:#e6a23c}
+.footer{text-align:center;color:#999;font-size:12px;padding:16px}
+.codes-block{margin:10px 0 14px;padding:10px 12px;background:#f7f9fc;border:1px solid #e3e8f0;border-radius:8px}
+.codes-label{font-size:13px;color:#1f2d3d;margin-bottom:6px}
+.codes-text{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:14px;line-height:1.6;white-space:pre-wrap;margin:0 0 8px;color:#0a4d8c}
+.copy-btn{background:#1677ff;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer}
+.copy-btn:hover{background:#0958d9}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📊 盘前选股简报 — 2026-09-04</h1>
+  <div class="meta">生成时间: 2026-09-04 08:42:08 | 耗时: 37.6s | 
+  选股数: 4 质量 + 8 短线 + 8 ETF</div>
+</div>
+
+<div class="summary">
+  <div class="card warn">
+    <div class="label">市场环境</div>
+    <div class="value">空头</div>
+  </div>
+  <div class="card info">
+    <div class="label">仓位上限</div>
+    <div class="value">20%</div>
+  </div>
+  <div class="card">
+    <div class="label">中长线推荐</div>
+    <div class="value">4<span style="font-size:14px;font-weight:400"> 只</span></div>
+  </div>
+  <div class="card">
+    <div class="label">短线推荐</div>
+    <div class="value">8<span style="font-size:14px;font-weight:400"> 只</span></div>
+  </div>
+</div>
+
+<div class="charts">
+  <div class="chart-box"><div id="chartScore" style="width:100%;height:100%"></div></div>
+  <div class="chart-box"><div id="chartSector" style="width:100%;height:100%"></div></div>
+</div>
+<div class="section"><h2>🏆 中长线组合（建议持仓 5-20 日）</h2><table><tr><th>强度</th><th>代码</th><th>名称</th><th>股价</th><th>止损</th><th>信号</th><th>技术面</th><th>基本面</th><th>评分</th><th>仓位</th><th>流动性</th></tr><tr><td style="font-size:16px">🔥🔥🔥</td><td>600751</td><td>海航科技</td><td>3.09</td><td class="bearish">3.03</td><td class="bullish">🟢偏多</td><td style="font-size:11px">跌破MA20,多头|金叉</td><td style="font-size:11px">ROE:+0.2%</td><td>105</td><td>2.7%</td><td>🔴低</td></tr><tr><td style="font-size:16px">🔥🔥🔥</td><td>601866</td><td>中远海发</td><td>2.43</td><td class="bearish">2.39</td><td class="bullish">🟢偏多</td><td style="font-size:11px">站上MA20,多头|发散</td><td style="font-size:11px">ROE:+1.3%</td><td>94</td><td>2.4%</td><td>🔴低</td></tr><tr><td style="font-size:16px">🔥🔥</td><td>600132</td><td>重庆啤酒</td><td>39.49</td><td class="bearish">38.59</td><td class="bearish">🔴偏空</td><td style="font-size:11px">跌破MA20,空头|发散</td><td style="font-size:11px">ROE:+27.3%</td><td>93</td><td>2.4%</td><td>🔴低</td></tr><tr><td style="font-size:16px">🔥🔥🔥</td><td>601336</td><td>新华保险</td><td>61.92</td><td class="bearish">60.60</td><td class="bullish">🟢偏多</td><td style="font-size:11px">站上MA20,多头|发散</td><td style="font-size:11px">ROE:+5.5%</td><td>92</td><td>2.4%</td><td>🟢高</td></tr></table></div><div class="codes-block"><div class="codes-label">📋 <b>同花顺自选（一键复制）</b> · 中长线</div><pre class="codes-text">600751 601866 600132 601336</pre><button class="copy-btn" data-codes="600751 601866 600132 601336" onclick="copyCodes(this)">复制全部</button></div><div class="section"><h2>⚡ 短线组合（建议持仓 1-5 日）</h2><table><tr><th>代码</th><th>名称</th><th>股价</th><th>止损</th><th>信号</th><th>概念</th><th>概念涨</th><th>评分</th><th>动量20</th><th>流动性</th></tr><tr><td>001248</td><td>华润新能</td><td>12.13</td><td class="bearish">11.86</td><td class="neutral">-</td><td>新能源发电业者(A股)</td><td>+0.2%</td><td>91</td><td>-8.9%</td><td>🟡中</td></tr><tr><td>000400</td><td>许继电气</td><td>21.02</td><td class="bearish">20.55</td><td class="neutral">🟡震荡</td><td>无线充电</td><td>+0.7%</td><td>91</td><td>-8.1%</td><td>🔴低</td></tr><tr><td>600406</td><td>国电南瑞</td><td>22.59</td><td class="bearish">22.23</td><td class="neutral">🟡震荡</td><td>抽水蓄能</td><td>+0.6%</td><td>91</td><td>-6.5%</td><td>🟢高</td></tr><tr><td>600131</td><td>国网信通</td><td>14.69</td><td class="bearish">14.40</td><td class="neutral">🟡震荡</td><td>中证500成份股</td><td>+0.3%</td><td>89</td><td>-7.3%</td><td>🔴低</td></tr><tr><td>600872</td><td>中炬高新</td><td>18.11</td><td class="bearish">17.76</td><td class="neutral">🟡震荡</td><td>制造业指数</td><td>+0.1%</td><td>88</td><td>-6.0%</td><td>🔴低</td></tr><tr><td>688349</td><td>三一重能</td><td>12.91</td><td class="bearish">12.58</td><td class="neutral">🟡震荡</td><td>工业(A股)</td><td>+0.4%</td><td>95</td><td>-14.3%</td><td>🔴低</td></tr><tr><td>002230</td><td>科大讯飞</td><td>39.20</td><td class="bearish">38.35</td><td class="bearish">🔴偏空</td><td>基金重仓股</td><td>+1.0%</td><td>94</td><td>-10.3%</td><td>🟢高</td></tr><tr><td>000682</td><td>东方电子</td><td>11.19</td><td class="bearish">10.96</td><td class="bearish">🔴偏空</td><td>工业(A股)</td><td>+0.4%</td><td>93</td><td>-8.8%</td><td>🔴低</td></tr></table></div><div class="codes-block"><div class="codes-label">📋 <b>同花顺自选（一键复制）</b> · 短线</div><pre class="codes-text">001248 000400 600406 600131 600872
+688349 002230 000682</pre><button class="copy-btn" data-codes="001248 000400 600406 600131 600872 688349 002230 000682" onclick="copyCodes(this)">复制全部</button></div><div class="section"><h2>📦 ETF 组合（A股股票型ETF为 T+1，仅货币/债券/黄金/跨境ETF为 T+0）</h2><table><tr><th>代码</th><th>名称</th><th>类型</th><th>结算</th><th>动量20日</th><th>建议</th></tr><tr><td>512880</td><td>证券ETF</td><td>宽基</td><td>T+1</td><td>-</td><td>关注</td></tr><tr><td>510050</td><td>上证50ETF</td><td>宽基</td><td>T+1</td><td>-</td><td>关注</td></tr><tr><td>510500</td><td>中证500ETF</td><td>宽基</td><td>T+1</td><td>-0.6%</td><td>关注</td></tr><tr><td>512100</td><td>中证1000ETF</td><td>宽基</td><td>T+1</td><td>+1.3%</td><td>关注</td></tr><tr><td>159845</td><td>中证1000</td><td>行业</td><td>T+1</td><td>+1.0%</td><td>关注</td></tr><tr><td>512690</td><td>酒ETF</td><td>宽基</td><td>T+1</td><td>-2.3%</td><td>关注</td></tr><tr><td>510300</td><td>沪深300ETF</td><td>宽基</td><td>T+1</td><td>-1.9%</td><td>关注</td></tr><tr><td>516510</td><td>云计算ETF</td><td>宽基</td><td>T+1</td><td>-4.5%</td><td>关注</td></tr></table></div><div class="codes-block"><div class="codes-label">📋 <b>同花顺自选（一键复制）</b> · ETF</div><pre class="codes-text">512880 510050 510500 512100 159845
+512690 510300 516510</pre><button class="copy-btn" data-codes="512880 510050 510500 512100 159845 512690 510300 516510" onclick="copyCodes(this)">复制全部</button></div><div class="section"><h2>👀 观察名单</h2><table><tr><th>代码</th><th>名称</th><th>板块</th><th>概念</th><th>评分</th><th>关注理由</th></tr><tr><td>001248</td><td>华润新能</td><td>新型电力</td><td>新能源发电业者(A股)</td><td>91</td><td>综合因子</td></tr><tr><td>300750</td><td>宁德时代</td><td>电气设备</td><td>机构重仓股</td><td>91</td><td>综合因子</td></tr><tr><td>000400</td><td>许继电气</td><td>电气设备</td><td>无线充电</td><td>91</td><td>综合因子</td></tr><tr><td>600406</td><td>国电南瑞</td><td>电气设备</td><td>抽水蓄能</td><td>91</td><td>综合因子</td></tr><tr><td>603606</td><td>东方电缆</td><td>电气设备</td><td>工业(A股)</td><td>91</td><td>综合因子</td></tr><tr><td>603885</td><td>吉祥航空</td><td>空运</td><td>航空运输业指数</td><td>91</td><td>综合因子</td></tr><tr><td>600089</td><td>特变电工</td><td>电气设备</td><td>抽水蓄能</td><td>90</td><td>综合因子</td></tr><tr><td>601021</td><td>春秋航空</td><td>空运</td><td>航空运输业指数</td><td>90</td><td>综合因子</td></tr><tr><td>000157</td><td>中联重科</td><td>工程机械</td><td>工业(A股)</td><td>90</td><td>综合因子</td></tr><tr><td>000899</td><td>赣能股份</td><td>火力发电</td><td>抽水蓄能</td><td>90</td><td>综合因子</td></tr><tr><td>688411</td><td>海博思创</td><td>电气设备</td><td>其他电源设备</td><td>90</td><td>综合因子</td></tr><tr><td>601127</td><td>赛力斯</td><td>汽车整车</td><td>无线充电</td><td>90</td><td>综合因子</td></tr><tr><td>600600</td><td>青岛啤酒</td><td>啤酒</td><td>啤酒</td><td>89</td><td>综合因子</td></tr><tr><td>600131</td><td>国网信通</td><td>通信设备</td><td>中证500成份股</td><td>89</td><td>综合因子</td></tr><tr><td>300415</td><td>伊之密</td><td>专用机械</td><td>工业(A股)</td><td>89</td><td>综合因子</td></tr><tr><td>000600</td><td>建投能源</td><td>火力发电</td><td>抽水蓄能</td><td>89</td><td>综合因子</td></tr><tr><td>600845</td><td>宝信软件</td><td>软件服务</td><td>上证180成份股</td><td>89</td><td>综合因子</td></tr><tr><td>688425</td><td>铁建重工</td><td>工程机械</td><td>抽水蓄能</td><td>88</td><td>综合因子</td></tr><tr><td>600872</td><td>中炬高新</td><td>食品</td><td>制造业指数</td><td>88</td><td>综合因子</td></tr><tr><td>603013</td><td>亚普股份</td><td>汽车配件</td><td>汽车零件与设备(A股)</td><td>88</td><td>综合因子</td></tr></table></div><div class="codes-block"><div class="codes-label">📋 <b>同花顺自选（一键复制）</b> · 观察</div><pre class="codes-text">001248 300750 000400 600406 603606
+603885 600089 601021 000157 000899
+688411 601127 600600 600131 300415
+000600 600845 688425 600872 603013</pre><button class="copy-btn" data-codes="001248 300750 000400 600406 603606 603885 600089 601021 000157 000899 688411 601127 600600 600131 300415 000600 600845 688425 600872 603013" onclick="copyCodes(this)">复制全部</button></div><div class="section"><h2>📈 持仓追踪与建议</h2><table><tr><th>代码</th><th>名称</th><th>当日股价</th><th>成本</th><th>盈亏</th><th>持仓数</th><th>市值</th><th>建议</th></tr><tr><td>159852</td><td>软件ETF嘉实</td><td>0.680</td><td>0.693</td><td>-22.1(-1.9%)</td><td>1700</td><td>1156</td><td>🟢 持平</td></tr><tr><td>159869</td><td>游戏ETF华夏</td><td>1.100</td><td>1.126</td><td>-72.8(-2.3%)</td><td>2800</td><td>3080</td><td>🟢 持平</td></tr><tr><td>512880</td><td>证券ETF国泰</td><td>1.100</td><td>1.093</td><td>+6.3(+0.6%)</td><td>900</td><td>990</td><td>🟢 持平</td></tr></table><p><b>当前状态</b>: 总持仓 5226 元 | 仓位 44.3% | 可用资金 6581 元</p><p><b>操作建议</b>: 仓位高于市场允许上限(20%)应减仓</p></div><div class="codes-block"><div class="codes-label">📋 <b>同花顺自选（一键复制）</b> · 持仓</div><pre class="codes-text">159852 159869 512880</pre><button class="copy-btn" data-codes="159852 159869 512880" onclick="copyCodes(this)">复制全部</button></div>
+<script>
+(function(){
+  // 评分分布
+  var c1 = echarts.init(document.getElementById('chartScore'));
+  c1.setOption({
+    title: {text:'评分分布',left:'center',textStyle:{fontSize:14}},
+    tooltip: {trigger:'axis'},
+    xAxis: {data:["<40", "40-50", "50-60", "60-70", "70-80", "80-90", "90+"]},
+    yAxis: {type:'value'},
+    series: [{name:'股票数',type:'bar',data:[0, 0, 0, 0, 0, 11, 18],
+      itemStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+        {offset:0,color:'#667eea'},{offset:1,color:'#764ba2'}])}}],
+    grid: {left:40,right:20,top:40,bottom:30}
+  });
+
+  // 板块分布
+  var c2 = echarts.init(document.getElementById('chartSector'));
+  c2.setOption({
+    title: {text:'板块分布',left:'center',textStyle:{fontSize:14}},
+    tooltip: {trigger:'item'},
+    series: [{type:'pie',radius:['40%','70%'],data:[{"name": "\u6c34\u8fd0", "value": 2}, {"name": "\u5564\u9152", "value": 1}, {"name": "\u4fdd\u9669", "value": 1}],
+      label:{fontSize:11},emphasis:{itemStyle:{shadowBlur:10,shadowColor:'rgba(0,0,0,.3)'}}}]
+  });
+
+  window.addEventListener('resize',function(){c1.resize();c2.resize();});
+})();
+</script>
+<div class="footer">🚀 自动生成于 2026-09-04 08:42 | Powered by a-stock-engine</div><script>function copyCodes(btn){var c=btn.getAttribute("data-codes")||"";if(navigator.clipboard){navigator.clipboard.writeText(c).then(function(){var t=btn.textContent;btn.textContent="已复制";setTimeout(function(){btn.textContent=t;},1500);});}else{var ta=document.createElement("textarea");ta.value=c;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);btn.textContent="已复制";setTimeout(function(){btn.textContent="复制全部";},1500);}}</script></body></html>
