@@ -116,9 +116,21 @@ def generate_brief(results: dict, config: dict) -> str:
         long_term = quality[quality.apply(_hold_period, axis=1).str.contains("中长线")].head(8)
     else:
         long_term = pd.DataFrame()
+    # 短线榜 = ②B + ②A 中被 _hold_period 判为短线的部分。
+    # 必须在执行摘要之前完成合并, 否则摘要里的短线只数会少算(只统计 raw ②B)。
     short_df = categories.get("②B_短线榜")
-    if short_df is None:
+    if short_df is not None and len(short_df) > 0:
+        if quality is not None and len(quality) > 0:
+            short_quality = quality[quality.apply(_hold_period, axis=1).str.contains("短线")]
+            short_df = pd.concat([short_df, short_quality], ignore_index=True).drop_duplicates(subset=["code"]).head(8)
+    else:
         short_df = pd.DataFrame()
+
+    # 单一数据源: 把 _hold_period 闸门后的视图回写到 results, 供 HTML 渲染复用,
+    # 避免 HTML 直接吃 raw ②A/②B 造成中长线/短线分类与 Markdown 不一致。
+    _bv = results.setdefault("brief_views", {})
+    _bv["long_term"] = long_term
+    _bv["short"] = short_df
     etf_picks = results.get("etf_picks", pd.DataFrame())
     watchlist = categories.get("③C_观察名单")
 
@@ -268,14 +280,7 @@ def generate_brief(results: dict, config: dict) -> str:
     # ============================================================
     # 三、短线组合（1-5日持仓）
     # ============================================================
-    short_df = categories.get("②B_短线榜")
-    if short_df is not None and len(short_df) > 0:
-        # 如果有质量榜的短线部分也合并进来
-        if quality is not None and len(quality) > 0:
-            short_quality = quality[quality.apply(_hold_period, axis=1).str.contains("短线")]
-            short_df = pd.concat([short_df, short_quality], ignore_index=True).drop_duplicates(subset=["code"]).head(8)
-    else:
-        short_df = pd.DataFrame()
+    # short_df 已在前置摘要处完成 ②B + ②A短线部分 的合并, 此处直接复用, 避免二次分叉。
 
     # 篮子分配: 短线篮子预算 = 仓位上限 × short_term 权重, 按评分加权到各票
     short_scores = short_df["composite_score"].tolist() if len(short_df) > 0 else []

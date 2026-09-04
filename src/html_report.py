@@ -21,8 +21,15 @@ def generate_html(results: dict, config: dict) -> str:
     categories = results.get("categories", {})
     l4 = results.get("l4_results", pd.DataFrame())
 
-    quality = categories.get("②A_质量榜", pd.DataFrame())
-    short_list = categories.get("②B_短线榜", pd.DataFrame())
+    # 优先复用 daily_brief 经 _hold_period 闸门切分后的视图(单一数据源),
+    # 缺失时才回退到 raw 分类, 保证 HTML 与 Markdown 的中长线/短线口径一致。
+    _views = results.get("brief_views") or {}
+    quality = _views.get("long_term")
+    if not isinstance(quality, pd.DataFrame):
+        quality = categories.get("②A_质量榜", pd.DataFrame())
+    short_list = _views.get("short")
+    if not isinstance(short_list, pd.DataFrame):
+        short_list = categories.get("②B_短线榜", pd.DataFrame())
     etf_picks = results.get("etf_picks", pd.DataFrame())
 
     regime_name = regime.get("regime", "未知") if isinstance(regime, dict) else str(regime)
@@ -146,7 +153,7 @@ tr:hover{{background:#f5f7fa}}
     html += '<div class="section"><h2>🏆 中长线组合（建议持仓 5-20 日）</h2>'
     if len(quality) > 0:
         html += '<table><tr><th>强度</th><th>代码</th><th>名称</th><th>股价</th><th>止损</th><th>信号</th><th>技术面</th><th>基本面</th><th>评分</th><th>仓位</th><th>流动性</th></tr>'
-        for _, r in quality.head(8).iterrows():
+        for _, r in q_view.iterrows():
             grade = r.get("signal_grade", "⚪")
             code = r.get("code", "")
             name = _clean(r.get("name", code))
@@ -166,13 +173,14 @@ tr:hover{{background:#f5f7fa}}
     else:
         html += '<p style="color:#999">暂无中长线推荐</p>'
     html += '</div>'
-    html += _html_codes_block(quality, "中长线")
+    html += _html_codes_block(q_view, "中长线")
 
     # === 短线表 ===
+    s_view = short_list.head(8) if len(short_list) > 0 else short_list
     html += '<div class="section"><h2>⚡ 短线组合（建议持仓 1-5 日）</h2>'
     if len(short_list) > 0:
         html += '<table><tr><th>代码</th><th>名称</th><th>股价</th><th>止损</th><th>信号</th><th>概念</th><th>概念涨</th><th>评分</th><th>动量20</th><th>流动性</th></tr>'
-        for _, r in short_list.head(8).iterrows():
+        for _, r in s_view.iterrows():
             code = r.get("code", "")
             name = _clean(r.get("name", code))
             close = _fmt_val(r.get("close"))
@@ -191,13 +199,14 @@ tr:hover{{background:#f5f7fa}}
     else:
         html += '<p style="color:#999">暂无短线推荐</p>'
     html += '</div>'
-    html += _html_codes_block(short_list, "短线")
+    html += _html_codes_block(s_view, "短线")
 
     # === ETF ===
+    etf_view = etf_picks.head(8) if len(etf_picks) > 0 else etf_picks
     html += '<div class="section"><h2>📦 ETF 组合（A股股票型ETF为 T+1，仅货币/债券/黄金/跨境ETF为 T+0）</h2>'
     if len(etf_picks) > 0:
         html += '<table><tr><th>代码</th><th>名称</th><th>类型</th><th>结算</th><th>动量20日</th><th>建议</th></tr>'
-        for _, r in etf_picks.head(8).iterrows():
+        for _, r in etf_view.iterrows():
             code = r.get("code", "")
             name = r.get("name", code)
             etype = r.get("etf_type", "-")
@@ -209,14 +218,15 @@ tr:hover{{background:#f5f7fa}}
     else:
         html += '<p style="color:#999">ETF数据暂不可用</p>'
     html += '</div>'
-    html += _html_codes_block(etf_picks, "ETF")
+    html += _html_codes_block(etf_view, "ETF")
 
     # === 观察名单（来自 categories ③C_观察名单）===
     watchlist = categories.get("③C_观察名单")
     if isinstance(watchlist, pd.DataFrame) and len(watchlist) > 0:
+        w_view = watchlist.head(20)
         html += '<div class="section"><h2>👀 观察名单</h2>'
         html += '<table><tr><th>代码</th><th>名称</th><th>板块</th><th>概念</th><th>评分</th><th>关注理由</th></tr>'
-        for _, r in watchlist.head(20).iterrows():
+        for _, r in w_view.iterrows():
             code = r.get("code", "")
             name = _clean(r.get("name", code))
             sector = r.get("sector", "-")
@@ -226,7 +236,7 @@ tr:hover{{background:#f5f7fa}}
             html += f'<tr><td>{code}</td><td>{name}</td><td>{sector}</td><td>{concept}</td><td>{score:.0f}</td><td>{reason}</td></tr>'
         html += '</table>'
         html += '</div>'
-        html += _html_codes_block(watchlist, "观察")
+        html += _html_codes_block(w_view, "观察")
 
     # === 持仓追踪（来自 config.account.holdings + results.holding_prices）===
     holdings = config.get("account", {}).get("holdings", {}) if isinstance(config, dict) else {}
